@@ -1,0 +1,12 @@
+# Aurvex Lens — never commit local config, data or logs
+data/
+config/local.toml
+*.log
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+build/
+dist/

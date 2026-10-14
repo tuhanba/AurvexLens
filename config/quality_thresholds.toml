@@ -1,0 +1,38 @@
+# PROPOSED — user approval pending (spec §6.2, open decision O2).
+# Approve only after seeing a live report. Once approved, record this file's
+# sha256 in config/local.toml [confirmations].thresholds_approved_sha256;
+# any later change is shown in the report as CHANGED_SINCE_APPROVAL.
+
+[c1]
+# PROPOSED — minimum history span in months per timeframe. Ticks: no threshold, coverage reported.
+min_months = { H1 = 24, M15 = 24, M5 = 24, M1 = 12 }
+
+[c2]
+# PROPOSED — UNEXPLAINED missing bars / expected bars, per timeframe
+max_unexplained_missing_ratio = 0.001
+# PROPOSED — longest single UNEXPLAINED gap
+max_single_unexplained_gap_minutes = 30
+# PROPOSED — every closure candidate must be user-confirmed for PASS
+require_all_closures_confirmed = true
+
+[c3]
+# PROPOSED — max last-tick age while market open (revise after measuring normal tick frequency)
+max_tick_age_seconds = 10
+
+[c4]
+# PROPOSED
+require_local_clock_synced = true
+max_unexplained_weeks = 0
+
+[c5]
+# PROPOSED (Phase 1 requirement)
+require_spread_from_ticks = true
+required_verified = ["commission", "contract"]
+
+[extra]
+# NOT IN SPEC §6.2 — added by implementation, user decision needed.
+# C6 (informational): share of M1 bars whose OHLC equals tick-derived bid OHLC.
+c6_min_bid_match_ratio = 0.999
+# C2 cross-timeframe consistency (M1 resampled vs terminal TF). Uncomment to make it a check;
+# while commented it is only reported.
+# cross_tf_max_price_mismatch_ratio = 0.0

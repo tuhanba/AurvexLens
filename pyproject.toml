@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aurvex-lens"
+version = "0.1.0"
+description = "Aurvex Lens — Phase 0: read-only MT5 bridge and data suitability report (no order placement)"
+readme = "README.md"
+# MetaTrader5 5.0.6231 ships Windows wheels cp36..cp314; pandas 3 / pyarrow 26 need >=3.11.
+# Pinned target: CPython 3.13 (Windows x64).
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "MetaTrader5==5.0.6231; sys_platform == 'win32'",
+    "pandas==3.0.5",
+    "numpy==2.5.3",
+    "pyarrow==26.0.0",
+    "tzdata==2026.5",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==9.1.1"]
+
+[project.scripts]
+aurvex-lens = "aurvex_lens.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]

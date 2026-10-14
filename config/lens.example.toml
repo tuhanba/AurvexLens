@@ -1,0 +1,59 @@
+# Aurvex Lens — example configuration.
+# Copy to config/local.toml (gitignored) and fill in. NEVER put passwords here:
+# the user logs in to the separate terminal manually with the investor password.
+
+[terminal]
+# Separate MT5 install used ONLY by Aurvex Lens (P2). initialize() gets path= only.
+terminal_path = 'C:\AurvexLens\mt5\terminal64.exe'
+# The existing EA terminal(s) (P4). Connection is refused if terminal_path matches.
+forbidden_terminal_paths = ['C:\Program Files\EA-TERMINAL-PATH-HERE\terminal64.exe']
+
+[account]
+expected_login = 0            # FTMO account number (P3) — local only, masked in all outputs
+expected_server = "FTMO-Server"  # exact server name as shown in the terminal
+
+[symbol]
+name = "XAGUSD"               # exact name as shown in the separate terminal (P6)
+
+[paths]
+data_dir = "data"
+
+[extract]
+timeframes = ["H1", "M15", "M5", "M1"]
+rates_chunk = 50000           # bars per copy_rates_from_pos call
+rates_max_bars = 20000000     # safety cap
+tick_probe_max_months = 180   # monthly 1h tick probes going back
+tick_probe_stop_after_empty = 3
+tick_full_days = 10           # recent full ticks for spread / bid-ask analysis
+live_probe_samples = 10       # 1 s apart, for C3/C4
+
+[analysis]
+closure_min_recurrence = 8    # gap pattern repeats >= N times -> CLOSURE_CANDIDATE (method param, proposed)
+reference_tz = "America/New_York"  # frame in which session anchors should be constant (assumption, see docs/02)
+server_rule_base_offsets = [0, 1, 2, 3]
+
+[confirmations]
+# Filled in by the USER after reading the Phase 0 report. Empty = not confirmed.
+closures = []                 # e.g. ["Fri 23:55 -> Mon 01:00", "Mon 23:55 -> Tue 01:00"] (server time)
+holiday_dates = []            # e.g. ["2025-12-25"] (server date)
+# server_time_rule = "US_DST+2"   # O3 — leave commented until approved
+# thresholds_approved_sha256 = "" # O2 — sha256 of config/quality_thresholds.toml once approved
+
+[official_costs.commission]
+# commission_per_lot_round_turn = 0.0
+# source_url = ""
+# verified_date = ""
+
+[official_costs.swap]
+# swap_long = 0.0
+# swap_short = 0.0
+# source_url = ""
+# verified_date = ""
+
+[official_costs.contract]
+# trade_contract_size = 0.0
+# trade_tick_size = 0.0
+# volume_min = 0.0
+# volume_step = 0.0
+# source_url = ""
+# verified_date = ""

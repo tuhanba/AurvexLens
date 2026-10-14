@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FTMO rule record",
+  "type": "object",
+  "required": ["rule_id", "version", "text", "source_url", "verified_date", "product", "phase", "recorded_utc"],
+  "properties": {
+    "rule_id": {"type": "string"},
+    "version": {"type": "integer", "minimum": 1},
+    "text": {"type": "string", "description": "Rule as stated by the official source"},
+    "parameters": {"type": "object"},
+    "source_url": {"type": "string"},
+    "verified_date": {"type": "string", "format": "date"},
+    "product": {"type": "string", "description": "FTMO program"},
+    "phase": {"type": "string", "description": "Challenge / Verification / FTMO Account"},
+    "account_size": {"type": ["number", "null"]},
+    "supersedes": {"type": ["string", "null"]},
+    "recorded_utc": {"type": "string", "format": "date-time"}
+  },
+  "additionalProperties": false
+}
