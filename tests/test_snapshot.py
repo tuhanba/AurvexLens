@@ -87,3 +87,69 @@ def test_tamper_detected(make_cfg):
     os.chmod(p, stat.S_IWRITE | stat.S_IREAD)
     p.write_text("{}")
     assert not all(x["ok"] for x in verify_snapshot(d))
+
+
+@pytest.mark.parametrize("fake_kw,cfg_kw", [({"symbol_visible": False}, {}), ({}, {"symbol": "XAGUSD."})])
+def test_symbol_not_in_market_watch_fails(make_cfg, capsys, fake_kw, cfg_kw):
+    cfg = make_cfg(**cfg_kw)
+    fake = FakeMT5(**fake_kw)
+    rc = cmd_extract(cfg, backend=fake, data_origin="SYNTHETIC", sleep=lambda s: None)
+    assert rc == 6
+    assert "Sembol Market Watch'ta görünmüyor — terminalde elle ekleyin." in capsys.readouterr().out
+    assert "copy_rates_from_pos" not in fake.calls and "copy_ticks_range" not in fake.calls
+    assert not hasattr(fake, "symbol_select")
+    from aurvex_lens.data.snapshot import SnapshotError, latest_snapshot
+    with pytest.raises(SnapshotError):
+        latest_snapshot(cfg.data_dir)  # aborted snapshots are never reported on
+
+
+def test_tick_probe_statuses():
+    import calendar
+    from aurvex_lens.data.extract import NO_HISTORY_BEFORE, TICKS_FOUND, WINDOW_EMPTY_RETRIED, probe_ticks
+    from aurvex_lens.bridge.mt5_readonly import ReadOnlyMT5
+    from tests.fixtures.synthetic import synth
+    latest = int(synth.ticks()["time"].iloc[-1])
+    _, probes = probe_ticks(ReadOnlyMT5(FakeMT5()), "XAGUSD", latest, 12, 3)
+    st = {p["month"]: p for p in probes}
+    assert st["2026-04"]["status"] == TICKS_FOUND and not st["2026-04"]["retry_used"]
+    assert st["2026-03"]["status"] == TICKS_FOUND
+    assert st["2026-02"]["status"] == NO_HISTORY_BEFORE  # synthetic data starts 2026-02-23
+    assert len(st["2026-02"]["attempts"]) == 5  # first Wednesday + 4 business days
+    days = [calendar.weekday(*__import__("time").gmtime(a["window_start_server"])[:3])
+            for a in st["2026-02"]["attempts"]]
+    assert days == [2, 3, 4, 0, 1]  # Wed Thu Fri Mon Tue
+    assert WINDOW_EMPTY_RETRIED not in {p["status"] for p in probes}
+
+
+def test_tick_probe_retry_finds_later_day():
+    from aurvex_lens.data.extract import TICKS_FOUND, probe_ticks
+    from aurvex_lens.bridge.mt5_readonly import ReadOnlyMT5
+
+    class GapFake(FakeMT5):
+        def copy_ticks_range(self, symbol, a, b, flags):  # first Wednesday of March 2026 is empty
+            if int(a.timestamp()) == 1772632800:
+                return super().copy_ticks_range(symbol, a, a, flags)[:0]
+            return super().copy_ticks_range(symbol, a, b, flags)
+    from tests.fixtures.synthetic import synth
+    _, probes = probe_ticks(ReadOnlyMT5(GapFake()), "XAGUSD", int(synth.ticks()["time"].iloc[-1]), 12, 3)
+    mar = next(p for p in probes if p["month"] == "2026-03")
+    assert mar["status"] == TICKS_FOUND and mar["retry_used"] and len(mar["attempts"]) == 2
+
+
+def test_ntp_probe_disabled_never_runs():
+    from aurvex_lens.data.extract import windows_clock_status
+    cmds = []
+    out = windows_clock_status(lambda c: cmds.append(c) or "Leap Indicator: 0(no warning)\nSource: time.windows.com\n",
+                               ntp_probe=False)
+    assert cmds == [["w32tm", "/query", "/status"]]
+    assert out["status"] == "SYNCED" and out["ntp_probe"].startswith("DISABLED")
+
+
+def test_ntp_probe_enabled_parses_offsets():
+    from aurvex_lens.data.extract import windows_clock_status
+    strip = "12:00:01, +00.0123456s\n12:00:03, -00.0023456s\n12:00:05, +00.0050000s\n"
+    out = windows_clock_status(lambda c: strip if "/stripchart" in c else "Kaynak: x\n", ntp_probe=True)
+    assert out["status"] == "UNKNOWN"  # localized /query output stays UNKNOWN, raw kept
+    assert out["raw"] == "Kaynak: x\n"
+    assert out["ntp_probe"]["offsets_s"] == [0.0123456, -0.0023456, 0.005]
+    assert len(out["methods_used"]) == 2

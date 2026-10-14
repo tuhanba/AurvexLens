@@ -62,8 +62,25 @@ def test_utc_frame_prefers_fixed_offset():
 
 def test_nfp_spike_identifies_offset():
     m5 = synth.bars(5).rename(columns={"time": "time_server"})
-    r = S.nfp_check(m5, 5, ["US_DST+1", "US_DST+2", "US_DST+3", "FIXED+2"])
+    events = [(d, 8 * 60 + 30) for d in S.first_fridays(int(m5.time_server.iloc[0]), int(m5.time_server.iloc[-1]))]
+    r = S.nfp_check(m5, 5, ["US_DST+1", "US_DST+2", "US_DST+3", "FIXED+2"], events)
     assert r["candidates"] == 1
     # 2026-03-06 is before the US switch, so FIXED+2 == US_DST+2 on that date: the NFP check
     # pins the base offset, the weekly anchor table separates the DST families.
     assert r["per_rule_hits"] == {"US_DST+1": 0, "US_DST+2": 1, "US_DST+3": 0, "FIXED+2": 1}
+
+
+def test_nfp_calendar_missing_is_unknown(tmp_path):
+    assert S.load_nfp_calendar(None)["status"] == "UNKNOWN"
+    assert S.load_nfp_calendar(tmp_path / "nope.csv")["status"] == "UNKNOWN"
+    bad = tmp_path / "bad.csv"
+    bad.write_text("day,time\n2026-03-06,08:30\n")
+    assert S.load_nfp_calendar(bad)["status"] == "UNKNOWN"
+
+
+def test_nfp_calendar_loaded(tmp_path):
+    f = tmp_path / "bls.csv"
+    f.write_text("date,release_time_et\n2026-03-06,08:30\n")
+    cal = S.load_nfp_calendar(f)
+    assert cal["status"] == "LOADED" and cal["events"] == [(__import__("datetime").date(2026, 3, 6), 510)]
+    assert len(cal["sha256"]) == 64

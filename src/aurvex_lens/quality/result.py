@@ -7,7 +7,20 @@ from typing import Any
 
 PASS, FAIL, UNKNOWN = "PASS", "FAIL", "UNKNOWN"
 NOT_APPLICABLE_MARKET_CLOSED = "NOT_APPLICABLE_MARKET_CLOSED"
+NOT_CONNECTED = "NOT_CONNECTED"  # C7: no calendar source (decision D-C7); never PASS
+RESULTS = (PASS, FAIL, UNKNOWN, NOT_APPLICABLE_MARKET_CLOSED, NOT_CONNECTED)
 UNAPPROVED_TZ_LABEL = "UYARI: saat dilimi kuralı onaylanmadı — time_utc değerleri ONAYSIZ"
+
+
+def is_pass(result: str) -> bool:
+    """Only PASS passes. UNKNOWN, NOT_CONNECTED, NOT_APPLICABLE_* never do."""
+    return result == PASS
+
+
+def data_gate(criteria: list["CriterionResult"]) -> dict:
+    """Phase-1 data gate: every blocking criterion must be PASS (spec §2.3 DATA_INSUFFICIENT)."""
+    failing = [{"id": c.id, "result": c.result} for c in criteria if c.blocking and not is_pass(c.result)]
+    return {"status": "DATA_INSUFFICIENT" if failing else "DATA_SUFFICIENT", "not_passing": failing}
 
 
 def combine(results: list[str]) -> str:

@@ -22,9 +22,9 @@ from aurvex_lens.quality.costs import evaluate_c5, evaluate_c6
 from aurvex_lens.quality.coverage import evaluate_c1, server_iso
 from aurvex_lens.quality.freshness import evaluate_c3
 from aurvex_lens.quality.result import (
-    FAIL, PASS, UNAPPROVED_TZ_LABEL, UNKNOWN, CriterionResult, combine,
+    FAIL, NOT_CONNECTED, PASS, UNAPPROVED_TZ_LABEL, UNKNOWN, CriterionResult, combine, data_gate,
 )
-from aurvex_lens.quality.server_time import evaluate_c4, rule_offset_s
+from aurvex_lens.quality.server_time import evaluate_c4, load_nfp_calendar, rule_offset_s
 
 
 class ReportError(Exception):
@@ -128,7 +128,7 @@ def evaluate_c2(frames, cfg: LensConfig, thresholds, out_dir: Path, point) -> tu
 
 
 def evaluate_c7() -> CriterionResult:
-    return CriterionResult("C7", "Takvim kapsamı", FAIL,
+    return CriterionResult("C7", "Takvim kapsamı", NOT_CONNECTED,
                            "Faz 0'da ekonomik takvim bağlı değil (O4 açık).",
                            metrics={"NEWS_CALENDAR": "NOT_CONNECTED"},
                            notes=["Bu rapordaki hiçbir bölüm 'haber açısından güvenli' anlamına gelmez.",
@@ -183,7 +183,8 @@ def build_report(snapshot_dir: Path, cfg: LensConfig, thresholds_path: Path) -> 
     c4, table = evaluate_c4(event_tf, classified.get(event_tf), frames.get(event_tf), live, clock,
                             cfg.server_rule_base_offsets, cfg.reference_tz, approved,
                             set(cfg.confirmations.get("holiday_dates", [])), thresholds,
-                            ev("clock_status.json", "live_probe.json"))
+                            ev("clock_status.json", "live_probe.json"),
+                            nfp_calendar=load_nfp_calendar(cfg.nfp_calendar_path))
     if not table.empty:
         p = out_dir / "c4_rule_match_weeks.csv"
         t = table.copy()
@@ -214,6 +215,7 @@ def build_report(snapshot_dir: Path, cfg: LensConfig, thresholds_path: Path) -> 
         "server_time_rule": approved or "NOT_APPROVED (O3)",
         "symbol": meta.get("symbol"),
         "snapshot_integrity": "OK" if all(x["ok"] for x in integrity) else "FAIL",
+        "phase1_data_gate": data_gate(criteria),
     }
     doc = {"header": header, "criteria": [asdict(c) for c in criteria],
            "access_probe_P0_7": access, "symbol_snapshot_P0_4": {
@@ -248,6 +250,9 @@ def render_md(doc: dict) -> str:
               "snapshot_integrity"):
         out.append(f"- {k}: `{h[k]}`")
     out.append(f"- **NEWS_CALENDAR: {h['NEWS_CALENDAR']}**")
+    gate = h["phase1_data_gate"]
+    failing = ", ".join(f"{x['id']}={x['result']}" for x in gate["not_passing"]) or "-"
+    out.append(f"- phase1_data_gate: **{gate['status']}** ({failing})")
     out += ["", "> Tek bir kalite skoru yoktur. Her kriter ayrı PASS / FAIL / UNKNOWN döner; UNKNOWN asla PASS "
             "sayılmaz. Faz 0 görevinin tamamlanması verinin uygun olduğu anlamına gelmez.", "",
             "> Tüm bar/tick zamanları **broker sunucu saatidir (time_server), UTC değildir**.", "",

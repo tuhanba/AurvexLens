@@ -23,7 +23,7 @@ AccountInfo = namedtuple("AccountInfo", "login trade_mode leverage limit_orders 
 Tick = namedtuple("Tick", "time bid ask last volume time_msc flags volume_real")
 SymbolInfo = namedtuple("SymbolInfo", "name digits point spread trade_contract_size trade_tick_size "
                         "trade_tick_value volume_min volume_step volume_max swap_mode swap_long swap_short "
-                        "swap_rollover3days currency_base currency_profit path")
+                        "swap_rollover3days currency_base currency_profit path visible")
 Sym = namedtuple("Sym", "name")
 TradeDeal = namedtuple("TradeDeal", "ticket order time time_msc type entry magic position_id reason volume price "
                        "commission swap profit fee symbol comment external_id")
@@ -40,7 +40,7 @@ class FakeMT5:
 
     def __init__(self, *, init_ok=True, path=TERMINAL_PATH, login=LOGIN, server=SERVER,
                  account_trade_allowed=False, terminal_trade_allowed=False, drop_fields=(),
-                 maxbars=100_000_000, symbol="XAGUSD"):
+                 maxbars=100_000_000, symbol="XAGUSD", symbol_visible=True, deals_mode="normal"):
         self.calls: list[str] = []
         self.init_kwargs: dict | None = None
         self.init_ok = init_ok
@@ -52,6 +52,8 @@ class FakeMT5:
         self.drop_fields = set(drop_fields)
         self.maxbars = maxbars
         self.symbol = symbol
+        self.symbol_visible = symbol_visible
+        self.deals_mode = deals_mode  # "normal" | "none" | "denied"
 
     def _rec(self, name):
         self.calls.append(name)
@@ -91,7 +93,7 @@ class FakeMT5:
         if symbol != self.symbol:
             return None
         return SymbolInfo(symbol, 3, synth.POINT, 20, 5000.0, 0.001, 5.0, 0.01, 0.01, 100.0, 1, -10.0, 2.0, 3,
-                          "XAG", "USD", "Metals\\" + symbol)
+                          "XAG", "USD", "Metals\\" + symbol, self.symbol_visible)
 
     def symbols_get(self, group=None):
         self._rec("symbols_get")
@@ -129,12 +131,15 @@ class FakeMT5:
 
     def history_deals_total(self, date_from, date_to):
         self._rec("history_deals_total")
-        return 3
+        return 9
 
     def history_deals_get(self, date_from, date_to):
         self._rec("history_deals_get")
-        return tuple(TradeDeal(i, i, 0, 0, 0, 0, 0, i, 0, 0.01, 30.0, -0.05, 0.0, 0.0, 0.0, self.symbol, "", "")
-                     for i in range(3))
+        if self.deals_mode == "denied":
+            return None
+        if self.deals_mode == "none":
+            return ()
+        return synthetic_deals(self.symbol)
 
     def positions_total(self):
         self._rec("positions_total")
@@ -152,3 +157,32 @@ def _drop(nt, fields):
     keep = [f for f in nt._fields if f not in fields]
     T = namedtuple(type(nt).__name__, keep)
     return T(*(getattr(nt, f) for f in keep))
+
+
+# Distinctive per-deal values: tests assert none of them ever reach disk, reports or stdout.
+DEAL_TICKET_BASE = 9_100_000
+DEAL_POSITION_BASE = 7_700_000
+DEAL_PRICE = 31.41593
+DEAL_PROFIT = 271.828
+DEAL_TIME = 1_773_000_123
+
+
+def synthetic_deals(symbol: str) -> tuple:
+    """SYNTHETIC — NOT MARKET DATA. Commission -2.5 per lot per side -> round turn -5.0/lot.
+    Positions 0..2 fully closed (pos 2 closed in two parts), pos 3 still open, plus one other-symbol deal."""
+    rows = []
+    t = DEAL_TICKET_BASE
+
+    def deal(pos, entry, vol, sym=symbol, comm_per_lot=-2.5):
+        nonlocal t
+        t += 1
+        rows.append(TradeDeal(t, t, DEAL_TIME + t % 1000, (DEAL_TIME + t % 1000) * 1000, 0, entry, 0,
+                              DEAL_POSITION_BASE + pos, 0, vol, DEAL_PRICE, comm_per_lot * vol, 0.0,
+                              DEAL_PROFIT if entry == 1 else 0.0, 0.0, sym, "", ""))
+
+    deal(0, 0, 1.0); deal(0, 1, 1.0)
+    deal(1, 0, 0.5); deal(1, 1, 0.5)
+    deal(2, 0, 2.0); deal(2, 1, 1.0); deal(2, 1, 1.0)
+    deal(3, 0, 0.3)
+    deal(4, 0, 1.0, sym="EURUSD", comm_per_lot=-9.0)
+    return tuple(rows)

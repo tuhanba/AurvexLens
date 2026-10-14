@@ -97,20 +97,37 @@ def _compare(sym: dict, official: dict, fields: tuple[str, ...]) -> dict[str, An
             "conflicts": conflicts}
 
 
-def commission_status(access: dict | None, official: dict) -> dict[str, Any]:
-    deals_has = bool(access and access.get("commission_field_present")
-                     and (access.get("deals_for_symbol_nonzero_commission_count") or 0) > 0)
-    off = official.get("commission_per_lot_round_turn")
-    sources = []
-    if deals_has:
-        sources.append("deal records (values not extracted in Phase 0 — P0.7 content restriction)")
-    if off is not None:
-        sources.append("official (user-provided)")
-    status = SINGLE_SOURCE if off is not None else MISSING
-    return {"status": status, "official_value": off, "official_source": official.get("source_url"),
-            "deal_records_contain_commission": deals_has, "sources_seen": sources,
-            "note": ("symbol_info is not assumed to contain commission. VERIFIED would need deal values compared "
-                     "against the official figure; reading deal values needs user approval.")}
+def commission_status(access: dict | None, official: dict, tolerance: float | None) -> dict[str, Any]:
+    """D-COMM: deal-derived round-turn median vs official value (with source URL + date).
+    Comparison on absolute values (brokers report commission as a negative charge)."""
+    agg = (access or {}).get("commission") or {"status": MISSING, "reason": "access probe missing"}
+    deal_rt = (agg.get("round_turn_per_lot") or {}).get("median") if agg.get("status") == "MEASURED" else None
+    off_val = official.get("commission_per_lot_round_turn")
+    off_complete = off_val is not None and bool(official.get("source_url")) and bool(official.get("verified_date"))
+    out: dict[str, Any] = {
+        "deal_aggregates": agg,
+        "official": {"commission_per_lot_round_turn": off_val, "source_url": official.get("source_url"),
+                     "verified_date": official.get("verified_date"), "complete": off_complete},
+        "tolerance_per_lot": tolerance,
+    }
+    notes = []
+    if off_val is not None and not off_complete:
+        notes.append("official value ignored: source_url and verified_date are required")
+    sources = int(deal_rt is not None) + int(off_complete)
+    if sources == 0:
+        out["status"] = MISSING
+        out["reason"] = agg.get("reason") if agg.get("status") == MISSING else "NO_ROUND_TURN_AND_NO_OFFICIAL"
+    elif sources == 1:
+        out["status"] = SINGLE_SOURCE
+    elif tolerance is None:
+        out["status"] = SINGLE_SOURCE
+        notes.append("no commission_match_tolerance configured -> cannot compare")
+    else:
+        diff = abs(abs(float(deal_rt)) - abs(float(off_val)))
+        out["abs_difference_per_lot"] = diff
+        out["status"] = VERIFIED if diff <= tolerance else CONFLICT
+    out["notes"] = notes
+    return out
 
 
 def evaluate_c5(symbol_info: dict | None, ticks: pd.DataFrame | None, m1: pd.DataFrame | None,
@@ -120,7 +137,8 @@ def evaluate_c5(symbol_info: dict | None, ticks: pd.DataFrame | None, m1: pd.Dat
     comps = {
         "spread_ticks": spread_distribution(ticks, point),
         "bar_spread_mapping": bar_spread_mapping(ticks, m1, point),
-        "commission": commission_status(access, official_costs.get("commission", {})),
+        "commission": commission_status(access, official_costs.get("commission", {}),
+                                        thresholds.get("c5", {}).get("commission_match_tolerance")),
         "swap": _compare(si, official_costs.get("swap", {}), SWAP_FIELDS),
         "contract": _compare(si, official_costs.get("contract", {}), CONTRACT_FIELDS),
         "slippage": {"status": MISSING, "note": "no historical fills; Phase 1 uses predefined scenarios"},

@@ -10,6 +10,7 @@ local system clock readings, which are explicitly named `system_utc_*`.
 from __future__ import annotations
 
 import calendar
+import re
 import subprocess
 import sys
 import time
@@ -23,10 +24,13 @@ import pandas as pd
 from aurvex_lens.bridge.mt5_readonly import ReadOnlyMT5
 from aurvex_lens.common.config import LensConfig
 from aurvex_lens.common.provenance import environment_versions, to_jsonable, utc_iso
+from aurvex_lens.data.commission import aggregate_commission
 from aurvex_lens.data.schema import TF_MINUTES, rates_to_frame, ticks_to_frame
 from aurvex_lens.data.snapshot import SnapshotWriter
 
 DAY = 86_400
+STATUS_COMPLETE = "COMPLETE"
+ABORTED_SYMBOL_NOT_VISIBLE = "ABORTED_SYMBOL_NOT_VISIBLE"
 
 
 def server_dt(epoch_server: int | float) -> datetime:
@@ -72,18 +76,31 @@ def extract_rates(mt5: ReadOnlyMT5, symbol: str, tf: str, chunk: int, max_bars: 
     return df, info
 
 
-def probe_windows(latest_server: int, max_months: int) -> list[tuple[int, int]]:
-    """1h window on the first Wednesday of each month, 14:00 server time,
-    going back from the month of `latest_server`. Future windows skipped."""
+TICKS_FOUND = "TICKS_FOUND"
+WINDOW_EMPTY_RETRIED = "WINDOW_EMPTY_RETRIED"
+NO_HISTORY_BEFORE = "NO_HISTORY_BEFORE"
+RETRY_BUSINESS_DAYS = 4
+
+
+def probe_attempts(y: int, m: int) -> list[int]:
+    """Start epochs (server time) for one month: first Wednesday 14:00, then the
+    next 4 business days (Thu, Fri, Mon, Tue) at 14:00 (decision D-TICK)."""
+    first_wd = calendar.weekday(y, m, 1)  # Mon=0
+    day0 = calendar.timegm((y, m, 1 + (2 - first_wd) % 7, 14, 0, 0))  # Wednesday=2
+    out, d = [day0], day0
+    while len(out) < 1 + RETRY_BUSINESS_DAYS:
+        d += DAY
+        if calendar.weekday(*datetime.fromtimestamp(d, tz=UTC).timetuple()[:3]) < 5:
+            out.append(d)
+    return out
+
+
+def probe_months(latest_server: int, max_months: int) -> list[tuple[int, int]]:
     d = datetime.fromtimestamp(latest_server, tz=UTC)
     y, m = d.year, d.month
     out = []
     for _ in range(max_months):
-        first_wd = calendar.weekday(y, m, 1)  # Mon=0
-        day = 1 + (2 - first_wd) % 7  # Wednesday=2
-        start = calendar.timegm((y, m, day, 14, 0, 0))
-        if start + 3600 <= latest_server:
-            out.append((start, start + 3600))
+        out.append((y, m))
         m -= 1
         if m == 0:
             y, m = y - 1, 12
@@ -96,21 +113,46 @@ def probe_ticks(mt5: ReadOnlyMT5, symbol: str, latest_server: int, max_months: i
     frames = []
     found_any = False
     empty_run = 0
-    for start, end in probe_windows(latest_server, max_months):
-        arr = mt5.copy_ticks_range(symbol, server_dt(start), server_dt(end), mt5.copy_ticks_all)
-        n = 0 if arr is None else len(arr)
-        rec = {"window_start_server": start, "window_end_server": end, "ticks": n}
-        if arr is None:
-            rec["last_error"] = to_jsonable(mt5.last_error())
-        probes.append(rec)
-        if n:
+    for y, m in probe_months(latest_server, max_months):
+        attempts = []
+        found = None
+        for start in probe_attempts(y, m):
+            if start + 3600 > latest_server:
+                attempts.append({"window_start_server": start, "ticks": None, "skipped": "in the future"})
+                continue
+            arr = mt5.copy_ticks_range(symbol, server_dt(start), server_dt(start + 3600), mt5.copy_ticks_all)
+            n = 0 if arr is None else len(arr)
+            att = {"window_start_server": start, "ticks": n}
+            if arr is None:
+                att["last_error"] = to_jsonable(mt5.last_error())
+            attempts.append(att)
+            if n:
+                found = (start, arr)
+                break
+        if all(a["ticks"] is None for a in attempts):
+            continue  # whole month in the future
+        rec = {"month": f"{y:04d}-{m:02d}", "attempts": attempts}
+        if found:
+            rec["status"] = TICKS_FOUND
+            rec["window_start_server"] = found[0]
+            rec["ticks"] = len(found[1])
+            rec["retry_used"] = len(attempts) > 1
+            frames.append(ticks_to_frame(found[1]))
             found_any = True
             empty_run = 0
-            frames.append(ticks_to_frame(arr))
-        elif found_any:
-            empty_run += 1
-            if empty_run >= stop_after_empty:
-                break
+        else:
+            rec["status"] = WINDOW_EMPTY_RETRIED
+            rec["ticks"] = 0
+            if found_any:
+                empty_run += 1
+        probes.append(rec)
+        if found_any and empty_run >= stop_after_empty:
+            break
+    # Empty months older than the oldest month with ticks: no history before it.
+    oldest_found = max((i for i, r in enumerate(probes) if r["status"] == TICKS_FOUND), default=None)
+    for i, r in enumerate(probes):
+        if r["status"] != TICKS_FOUND and (oldest_found is None or i > oldest_found):
+            r["status"] = NO_HISTORY_BEFORE if oldest_found is not None else WINDOW_EMPTY_RETRIED
     frames.reverse()
     df = pd.concat(frames, ignore_index=True) if frames else ticks_to_frame(None)
     return df.sort_values("time_msc_server", kind="stable").reset_index(drop=True), probes
@@ -136,32 +178,60 @@ def extract_recent_ticks(mt5: ReadOnlyMT5, symbol: str, latest_server: int, days
     return df, info
 
 
-def windows_clock_status(runner: Callable[[list[str]], str] | None = None) -> dict[str, Any]:
-    """Local clock sync status via `w32tm /query /status` (read-only query)."""
+NTP_HOST = "time.windows.com"
+_STRIP_RE = re.compile(r"([+-]\d+(?:[.,]\d+)?)s\s*$")
+
+
+def windows_clock_status(runner: Callable[[list[str]], str] | None = None, ntp_probe: bool = False) -> dict[str, Any]:
+    """Local clock sync status (decision D-NTP).
+
+    Method 1 (always): `w32tm /query /status` — local, read-only.
+    Method 2 (only if ntp_probe=true): `w32tm /stripchart` against an external
+    NTP server; numeric offsets. Disabled by default (external query).
+    """
     if runner is None:
         if sys.platform != "win32":
-            return {"status": "UNKNOWN", "reason": "not running on Windows", "raw": None}
+            return {"status": "UNKNOWN", "reason": "not running on Windows", "raw": None,
+                    "methods_used": [], "ntp_probe": "NOT_RUN (not Windows)"}
 
         def runner(cmd: list[str]) -> str:
-            return subprocess.run(cmd, capture_output=True, text=True, timeout=15, check=False).stdout
+            return subprocess.run(cmd, capture_output=True, text=True, timeout=30, check=False).stdout
 
+    out: dict[str, Any] = {"methods_used": ["w32tm /query /status"]}
     try:
         raw = runner(["w32tm", "/query", "/status"])
     except Exception as e:  # noqa: BLE001
-        return {"status": "UNKNOWN", "reason": f"w32tm failed: {e}", "raw": None}
-    fields = {}
-    for line in (raw or "").splitlines():
-        if ":" in line:
-            k, v = line.split(":", 1)
-            fields[k.strip()] = v.strip()
-    leap = fields.get("Leap Indicator")
-    source = fields.get("Source")
-    if leap is None or source is None:
-        return {"status": "UNKNOWN", "reason": "w32tm output not parseable (localized?); see raw", "raw": raw,
-                "fields": fields}
-    unsynced_sources = ("local cmos clock", "free-running system clock")
-    synced = leap.startswith("0") and source.lower() not in unsynced_sources
-    return {"status": "SYNCED" if synced else "NOT_SYNCED", "raw": raw, "fields": fields}
+        raw = None
+        out.update({"status": "UNKNOWN", "reason": f"w32tm failed: {e}"})
+    if raw is not None:
+        fields = {}
+        for line in raw.splitlines():
+            if ":" in line:
+                k, v = line.split(":", 1)
+                fields[k.strip()] = v.strip()
+        out.update({"raw": raw, "fields": fields})
+        leap, source = fields.get("Leap Indicator"), fields.get("Source")
+        if leap is None or source is None:
+            out.update({"status": "UNKNOWN", "reason": "w32tm output not parseable (localized?); see raw"})
+        else:
+            synced = leap.startswith("0") and source.lower() not in ("local cmos clock", "free-running system clock")
+            out["status"] = "SYNCED" if synced else "NOT_SYNCED"
+    if not ntp_probe:
+        out["ntp_probe"] = "DISABLED (config [extract].ntp_probe = false)"
+        return out
+    cmd = ["w32tm", "/stripchart", f"/computer:{NTP_HOST}", "/samples:3", "/dataonly"]
+    out["methods_used"].append(" ".join(cmd))
+    try:
+        sraw = runner(cmd)
+    except Exception as e:  # noqa: BLE001
+        out["ntp_probe"] = {"status": "UNKNOWN", "reason": f"stripchart failed: {e}"}
+        return out
+    offsets = [float(m.group(1).replace(",", ".")) for line in (sraw or "").splitlines()
+               if (m := _STRIP_RE.search(line.strip()))]
+    out["ntp_probe"] = {"host": NTP_HOST, "raw": sraw, "offsets_s": offsets,
+                        "median_offset_s": float(np.median(offsets)) if offsets else None,
+                        "status": "MEASURED" if offsets else "UNKNOWN"}
+    return out
 
 
 def live_probe(mt5: ReadOnlyMT5, symbol: str, samples: int, sleep: Callable[[float], None]) -> dict[str, Any]:
@@ -182,28 +252,28 @@ def live_probe(mt5: ReadOnlyMT5, symbol: str, samples: int, sleep: Callable[[flo
     return {"samples": out, "note": "system_utc_ms = local system clock; tick time is server time (not UTC)"}
 
 
-def access_probe(mt5: ReadOnlyMT5, symbol: str, now_server: int) -> dict[str, Any]:
-    """P0.7 — counts and field names only; deal contents are not stored."""
-    frm, to = server_dt(946_684_800), server_dt(now_server + DAY)  # 2000-01-01 .. now+1d
-    total = mt5.history_deals_total(frm, to)
-    deals = mt5.history_deals_get(frm, to)
+def access_probe(mt5: ReadOnlyMT5, symbol: str, now_server: int, commission_days: int) -> dict[str, Any]:
+    """P0.7 + D-COMM. Counts, field names and commission aggregates only."""
+    total = mt5.history_deals_total(server_dt(946_684_800), server_dt(now_server + DAY))  # 2000-01-01 .. now+1d
     res: dict[str, Any] = {
-        "history_deals_total": to_jsonable(total),
+        "history_deals_total_since_2000": to_jsonable(total),
         "history_deals_total_error": None if total is not None else to_jsonable(mt5.last_error()),
-        "history_deals_get_returned": "None" if deals is None else f"{len(deals)} records",
-        "history_deals_get_error": None if deals is not None else to_jsonable(mt5.last_error()),
-        "deal_field_names": list(deals[0]._fields) if deals else [],
     }
-    if deals:
-        sym_deals = [d for d in deals if getattr(d, "symbol", None) == symbol]
-        res["deals_for_symbol_count"] = len(sym_deals)
-        res["commission_field_present"] = "commission" in deals[0]._fields
-        res["deals_for_symbol_nonzero_commission_count"] = (
-            sum(1 for d in sym_deals if getattr(d, "commission", 0)) if res["commission_field_present"] else None)
-    pt = mt5.positions_total()
-    res["positions_total"] = to_jsonable(pt)
-    res["note"] = "Only counts and field names are recorded; no deal/position contents."
+    frm, to = server_dt(now_server - commission_days * DAY), server_dt(now_server + DAY)
+    deals = mt5.history_deals_get(frm, to)
+    err = None if deals is not None else mt5.last_error()
+    res["history_deals_get_window_days"] = commission_days
+    res["history_deals_get_returned"] = "None" if deals is None else f"{len(deals)} records"
+    res["history_deals_get_error"] = to_jsonable(err)
+    res["deal_field_names"] = list(deals[0]._fields) if deals else []
+    res["commission"] = aggregate_commission(deals, symbol, commission_days, to_jsonable(err))
+    del deals
+    res["positions_total"] = to_jsonable(mt5.positions_total())
+    res["note"] = "Counts, field names and commission aggregates only; no deal/position rows."
     return res
+
+
+SYMBOL_NOT_VISIBLE_MSG = "Sembol Market Watch'ta görünmüyor — terminalde elle ekleyin."
 
 
 def symbol_snapshot(mt5: ReadOnlyMT5, symbol: str) -> dict[str, Any]:
@@ -211,9 +281,12 @@ def symbol_snapshot(mt5: ReadOnlyMT5, symbol: str) -> dict[str, Any]:
     letters = "".join(ch for ch in symbol if ch.isalpha())[:3] or symbol
     group = f"*{letters}*"
     syms = mt5.symbols_get(group)
+    visible = getattr(info, "visible", None) if info is not None else None
     return {
         "configured_symbol": symbol,
         "symbol_found": info is not None,
+        "symbol_visible": visible,
+        "market_watch_ok": info is not None and visible is True,
         "symbol_info": to_jsonable(info) if info is not None else None,
         "symbol_info_error": None if info is not None else to_jsonable(mt5.last_error()),
         "symbols_get_group": group,
@@ -232,11 +305,12 @@ def run_extraction(mt5: ReadOnlyMT5, cfg: LensConfig, identity: dict[str, Any], 
 
     sym = symbol_snapshot(mt5, cfg.symbol)
     writer.write_json("symbol_snapshot.json", sym)
-    if not sym["symbol_found"]:
-        writer.finalize({"status": "ABORTED_SYMBOL_NOT_FOUND", "extraction_started_utc": started})
+    if not sym["market_watch_ok"]:
+        writer.finalize({"status": ABORTED_SYMBOL_NOT_VISIBLE, "reason": SYMBOL_NOT_VISIBLE_MSG,
+                         "extraction_started_utc": started})
         return writer
 
-    writer.write_json("clock_status.json", windows_clock_status(clock_runner))
+    writer.write_json("clock_status.json", windows_clock_status(clock_runner, cfg.ntp_probe))
     writer.write_json("live_probe.json", live_probe(mt5, cfg.symbol, cfg.live_probe_samples, sleep))
 
     maxbars = getattr(ti, "maxbars", None)
@@ -256,7 +330,8 @@ def run_extraction(mt5: ReadOnlyMT5, cfg: LensConfig, identity: dict[str, Any], 
         tp_df, probes = probe_ticks(mt5, cfg.symbol, latest, cfg.tick_probe_max_months,
                                     cfg.tick_probe_stop_after_empty)
         writer.write_json("tick_probes.json", {
-            "method": "1h window, first Wednesday of each month, 14:00-15:00 server time, COPY_TICKS_ALL",
+            "method": ("1h window, first Wednesday of each month 14:00-15:00 server time; if empty, the next "
+                       f"{RETRY_BUSINESS_DAYS} business days at 14:00; COPY_TICKS_ALL"),
             "stop_rule": f"after {cfg.tick_probe_stop_after_empty} consecutive empty months once data found, "
                          f"or {cfg.tick_probe_max_months} months",
             "probes": probes})
@@ -264,10 +339,11 @@ def run_extraction(mt5: ReadOnlyMT5, cfg: LensConfig, identity: dict[str, Any], 
         rt_df, rt_info = extract_recent_ticks(mt5, cfg.symbol, latest, cfg.tick_full_days)
         writer.write_parquet("ticks_recent.parquet", rt_df, rt_info)
 
-    writer.write_json("access_probe.json", access_probe(mt5, cfg.symbol, latest or int(time.time())))
+    writer.write_json("access_probe.json",
+                      access_probe(mt5, cfg.symbol, latest or int(time.time()), cfg.commission_history_days))
 
     writer.finalize({
-        "status": "COMPLETE",
+        "status": STATUS_COMPLETE,
         "extraction_started_utc": started,
         "extraction_finished_utc": utc_iso(),
         "terminal_build": getattr(ti, "build", None),

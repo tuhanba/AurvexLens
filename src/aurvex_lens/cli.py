@@ -15,8 +15,10 @@ from aurvex_lens.bridge.identity import EXIT_CONFIG, EXIT_INIT, EXIT_OK, Identit
 from aurvex_lens.bridge.mt5_readonly import ReadOnlyMT5
 from aurvex_lens.common.config import DEFAULT_CONFIG, DEFAULT_THRESHOLDS, ConfigError, LensConfig, load_config
 from aurvex_lens.common.provenance import dumps, new_run_id
-from aurvex_lens.data.extract import run_extraction
-from aurvex_lens.data.snapshot import ORIGIN_LIVE, latest_snapshot
+from aurvex_lens.data.extract import STATUS_COMPLETE, SYMBOL_NOT_VISIBLE_MSG, run_extraction
+from aurvex_lens.data.snapshot import ORIGIN_LIVE, SnapshotError, latest_snapshot
+
+EXIT_SYMBOL = 6
 from aurvex_lens.quality.report import ReportError, build_report
 
 
@@ -64,6 +66,10 @@ def cmd_extract(cfg: LensConfig, backend: Any = None, data_origin: str = ORIGIN_
         if rep.initialized:
             mt5.shutdown()
     print(f"snapshot: {writer.dir}")
+    if writer.status != STATUS_COMPLETE:
+        print(f"extract FAIL ({writer.status}): {SYMBOL_NOT_VISIBLE_MSG}")
+        print("symbol_select is not used; no market data was read.")
+        return EXIT_SYMBOL
     for f in writer.files:
         print(f"  {f['file']}: rows={f.get('rows', '-')} sha256={f['sha256'][:16]}…")
     return EXIT_OK
@@ -103,7 +109,7 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_INIT
     try:
         return cmd_report(cfg, args.extraction_id, args.thresholds)
-    except ReportError as e:
+    except (ReportError, SnapshotError) as e:
         print(f"report error: {e}", file=sys.stderr)
         return 1
 

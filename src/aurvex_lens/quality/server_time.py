@@ -10,12 +10,15 @@ volatility spike on candidate US payroll Fridays to New York time.
 
 from __future__ import annotations
 
+import csv
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
+from aurvex_lens.common.provenance import sha256_file
 from aurvex_lens.quality.gaps import (
     CLOSURE_CANDIDATE, EXPECTED_CLOSURE, WEEK_MIN, fmt_wm,
 )
@@ -149,30 +152,50 @@ def first_fridays(first_server: int, last_server: int) -> list[date]:
     return out
 
 
-def nfp_check(bars: pd.DataFrame, tf_min: int, rules: list[str]) -> dict[str, Any]:
+def load_nfp_calendar(path: Path | None) -> dict[str, Any]:
+    """Official BLS release calendar supplied by the user. CSV: date,release_time_et
+    (e.g. 2026-03-06,08:30). Missing/invalid file -> UNKNOWN (decision D-NFP)."""
+    if path is None:
+        return {"status": UNKNOWN, "reason": "config [analysis].nfp_calendar_path not set", "events": []}
+    path = Path(path)
+    if not path.exists():
+        return {"status": UNKNOWN, "reason": f"file not found: {path}", "events": []}
+    events = []
+    try:
+        with open(path, newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                d = date.fromisoformat(row["date"].strip())
+                hh, mm = row["release_time_et"].strip().split(":")
+                events.append((d, int(hh) * 60 + int(mm)))
+    except (KeyError, ValueError) as e:
+        return {"status": UNKNOWN, "reason": f"invalid calendar file: {e}", "events": []}
+    return {"status": "LOADED", "path": str(path), "sha256": sha256_file(path), "events": events}
+
+
+def nfp_check(bars: pd.DataFrame | None, tf_min: int, rules: list[str],
+              events: list[tuple[date, int]]) -> dict[str, Any]:
+    """For each (date, release minute ET): the max-range bar on that server date should start at
+    the release minute (floored to the TF) in New York time under the correct rule."""
     if bars is None or bars.empty:
-        return {"status": UNKNOWN, "reason": "no bars"}
+        return {"candidates": 0, "per_rule_hits": {}, "reason": "no bars"}
     t = bars["time_server"].to_numpy()
     day = t // 86400
     rng = (bars["high"] - bars["low"]).to_numpy()
-    spikes = []
-    for fri in first_fridays(int(t[0]), int(t[-1])):
-        dnum = (datetime(fri.year, fri.month, fri.day, tzinfo=UTC).timestamp()) // 86400
-        idx = np.nonzero(day == dnum)[0]
+    spikes, expected = [], []
+    for d, minute in events:
+        idx = np.nonzero(day == datetime(d.year, d.month, d.day, tzinfo=UTC).timestamp() // 86400)[0]
         if len(idx) < 10:
             continue
-        spikes.append((fri.isoformat(), int(t[idx[np.argmax(rng[idx])]])))
-    expected = 8 * 60 + 30 - (8 * 60 + 30) % tf_min
-    res = {"candidates": len(spikes), "expected_ny_bar_start": f"{expected // 60:02d}:{expected % 60:02d}",
-           "per_rule_hits": {}, "note": ("Candidate dates = first Friday of month (approximation, not the official "
-                                         "BLS schedule). Spike = bar with max high-low on that server date.")}
+        spikes.append(int(t[idx[np.argmax(rng[idx])]]))
+        expected.append(minute - minute % tf_min)
+    res: dict[str, Any] = {"candidates": len(spikes), "per_rule_hits": {}}
     if not spikes:
         return res
-    st = np.array([s for _, s in spikes])
+    st, ex = np.array(spikes), np.array(expected)
     for rule in rules:
         utc = server_to_utc(rule, st)
         ny = utc + _tz_offset_s("America/New_York", utc)
-        res["per_rule_hits"][rule] = int((((ny // 60) % 1440) == expected).sum())
+        res["per_rule_hits"][rule] = int((((ny // 60) % 1440) == ex).sum())
     return res
 
 
@@ -191,77 +214,107 @@ def live_offset(live: dict | None) -> dict[str, Any]:
             "note": "server tick time − system UTC; residual includes tick staleness (large if market closed)"}
 
 
+def _frame_summary(table: pd.DataFrame, rule: str) -> dict[str, int]:
+    col = table[rule]
+    div = divergence_weeks(table.index.to_numpy())
+    return {"matched": int(col.sum()), "unexplained": int((~col).sum()), "divergence_matched": int(col[div].sum())}
+
+
 def evaluate_c4(event_tf: str | None, event_gaps: pd.DataFrame | None, event_bars: pd.DataFrame | None,
                 live: dict | None, clock: dict | None, base_offsets: tuple[int, ...], frame: str,
                 approved_rule: str | None, confirmed_holidays: set[str], thresholds: dict,
-                evidence: list[str]) -> tuple[CriterionResult, pd.DataFrame]:
+                evidence: list[str], nfp_calendar: dict | None = None) -> tuple[CriterionResult, pd.DataFrame]:
     rules = candidate_rules(base_offsets)
+    other_frame = "UTC" if frame != "UTC" else "America/New_York"
     lo = live_offset(live)
-    clock_status = (clock or {}).get("status", UNKNOWN)
-    metrics: dict[str, Any] = {"local_clock": {"status": clock_status, "reason": (clock or {}).get("reason")},
-                               "current_server_offset": lo, "event_timeframe": event_tf,
-                               "reference_frame": frame, "candidate_rules": rules, "approved_rule": approved_rule}
+    clock = clock or {}
+    clock_status = clock.get("status", UNKNOWN)
+    nfp_calendar = nfp_calendar or {"status": UNKNOWN, "reason": "not provided", "events": []}
+    metrics: dict[str, Any] = {
+        "local_clock": {"status": clock_status, "reason": clock.get("reason"),
+                        "methods_used": clock.get("methods_used", []), "ntp_probe": clock.get("ntp_probe")},
+        "current_server_offset": lo, "event_timeframe": event_tf,
+        "reference_frame": frame, "comparison_frame": other_frame,
+        "candidate_rules": rules, "approved_rule": approved_rule}
     method = ("Anchors (weekly open/close, daily break) from classified gaps; each candidate rule converts server→UTC, "
-              f"then to reference frame '{frame}'; a week matches if all anchors equal the modal frame time. "
-              "US/EU DST divergence weeks reported separately. NFP spike check in America/New_York.")
+              f"then to the reference frame '{frame}' (decision) and, side by side, '{other_frame}'; a week matches if "
+              "all anchors equal the modal frame time. US/EU DST divergence weeks reported separately. NFP check "
+              "uses the user-supplied official BLS calendar only; approximate dates are shown as 'approx — not "
+              "evidence'. Rule selection is never auto-approved (O3).")
     if event_gaps is None or event_bars is None or event_bars.empty:
         return CriterionResult("C4", "Saat doğruluğu", UNKNOWN, method, metrics, evidence=evidence,
                                notes=["no bars for event extraction"]), pd.DataFrame()
     events = extract_events(event_gaps)
     table = rule_match_table(events, rules, frame)
+    table_other = rule_match_table(events, rules, other_frame)
+    tf_min = int(event_tf[1:]) if event_tf.startswith("M") else 60
+    t = event_bars["time_server"].to_numpy()
+    nfp_official = (nfp_check(event_bars, tf_min, rules, nfp_calendar["events"])
+                    if nfp_calendar["status"] == "LOADED" else {"candidates": 0, "per_rule_hits": {}})
+    nfp_approx = nfp_check(event_bars, tf_min, rules, [(d, 8 * 60 + 30) for d in first_fridays(int(t[0]), int(t[-1]))])
     rows = []
     if not table.empty:
         div = divergence_weeks(table.index.to_numpy())
         for rule in rules:
-            col = table[rule]
-            row = {"rule": rule, "weeks": int(len(col)), "matched": int(col.sum()),
-                   "unexplained": int((~col).sum()),
-                   "divergence_weeks": int(div.sum()), "divergence_matched": int(col[div].sum())}
+            ref = _frame_summary(table, rule)
+            oth = _frame_summary(table_other, rule)
+            row = {"rule": rule, "weeks": int(len(table)), "divergence_weeks": int(div.sum()),
+                   f"unexplained [{frame}]": ref["unexplained"],
+                   f"divergence_matched [{frame}]": ref["divergence_matched"],
+                   f"unexplained [{other_frame}]": oth["unexplained"],
+                   f"divergence_matched [{other_frame}]": oth["divergence_matched"],
+                   "nfp_hits_official": (nfp_official["per_rule_hits"].get(rule)
+                                         if nfp_calendar["status"] == "LOADED" else UNKNOWN),
+                   "nfp_hits_approx (not evidence)": nfp_approx["per_rule_hits"].get(rule)}
             if lo.get("status") == "MEASURED":
                 off = int(rule_offset_s(rule, np.array([lo["system_utc_ms"] // 1000]))[0])
                 row["consistent_with_live_offset"] = off == lo["rounded_offset_s"]
             else:
                 row["consistent_with_live_offset"] = None
-            row["modal_anchor_times"] = modal_times(events, rule, frame)
+            row["modal_anchor_times [" + frame + "]"] = modal_times(events, rule, frame)
             rows.append(row)
-    nfp = nfp_check(event_bars, int(event_tf[1:]) if event_tf.startswith("M") else 60, rules)
-    for r in rows:
-        r["nfp_hits"] = nfp.get("per_rule_hits", {}).get(r["rule"])
-    ranked = sorted(rows, key=lambda r: (r["unexplained"], -(r["nfp_hits"] or 0),
+    official_hits = lambda r: r["nfp_hits_official"] if isinstance(r["nfp_hits_official"], int) else 0  # noqa: E731
+    ranked = sorted(rows, key=lambda r: (r[f"unexplained [{frame}]"], -official_hits(r),
                                          r["consistent_with_live_offset"] is not True))
-    metrics["nfp_check"] = nfp
-    unexplained_all = []
-    if not table.empty:
-        none_ok = ~table.any(axis=1)
-        unexplained_all = [week_start_date(w) for w in table.index[none_ok]]
-    metrics["weeks_unexplained_under_all_rules"] = unexplained_all
-    tables = [{"title": "Aday kural özeti (rule_match)", "utc": True,
-               "columns": ["rule", "weeks", "matched", "unexplained", "divergence_weeks", "divergence_matched",
-                           "nfp_hits", "consistent_with_live_offset", "modal_anchor_times"],
-               "rows": ranked}]
+    metrics["nfp_official"] = {"calendar_status": nfp_calendar["status"], "reason": nfp_calendar.get("reason"),
+                               "calendar_path": nfp_calendar.get("path"), "calendar_sha256": nfp_calendar.get("sha256"),
+                               **nfp_official}
+    metrics["nfp_approx_not_evidence"] = {**nfp_approx, "label": "approx — not evidence",
+                                          "note": "first Friday of month at 08:30 ET; never affects C4 result"}
+    metrics["weeks_unexplained_under_all_rules"] = (
+        [week_start_date(w) for w in table.index[~table.any(axis=1)]] if not table.empty else [])
+    cols = list(ranked[0].keys()) if ranked else []
+    tables = [{"title": "Aday kural özeti (rule_match) — iki çerçeve yan yana", "utc": True,
+               "columns": cols, "rows": ranked}]
     notes = [UNAPPROVED_TZ_LABEL] if not approved_rule else []
+    notes.append("Sıralama yalnızca bilgi amaçlıdır; kural seçimi kullanıcı onayı gerektirir (O3).")
     sub = []
     max_unexp = thresholds.get("c4", {}).get("max_unexplained_weeks")
     clock_res = PASS if clock_status == "SYNCED" else (FAIL if clock_status == "NOT_SYNCED" else UNKNOWN)
-    sub.append({"check": "local_clock_synced", "result": clock_res})
+    sub.append({"check": "local_clock_synced", "result": clock_res,
+                "method": ", ".join(clock.get("methods_used", [])) or "none"})
+    nfp_sub = {"check": "nfp_official_calendar (evidence, non-gating)", "result": UNKNOWN,
+               "calendar_status": nfp_calendar["status"], "gating": False}
+    if nfp_calendar["status"] == "LOADED" and approved_rule:
+        nfp_sub["hits"] = nfp_official["per_rule_hits"].get(approved_rule)
+        nfp_sub["candidates"] = nfp_official["candidates"]
+        nfp_sub["result"] = "REPORTED"
     if not approved_rule:
         sub.append({"check": "approved_rule", "result": UNKNOWN, "reason": "O3 not approved by user"})
-        result = UNKNOWN
+    elif approved_rule not in table.columns:
+        sub.append({"check": "approved_rule", "result": UNKNOWN,
+                    "reason": f"approved rule {approved_rule} not among evaluated candidates"})
     else:
-        if approved_rule not in table.columns:
-            sub.append({"check": "approved_rule", "result": UNKNOWN,
-                        "reason": f"approved rule {approved_rule} not among evaluated candidates"})
-        else:
-            bad = table.index[~table[approved_rule]]
-            bad_dates = []
-            for w in bad:
-                start = datetime.fromisoformat(week_start_date(w))
-                days = {(start + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)}
-                if not days & confirmed_holidays:
-                    bad_dates.append(week_start_date(w))
-            r = UNKNOWN if max_unexp is None else (PASS if len(bad_dates) <= max_unexp else FAIL)
-            sub.append({"check": "approved_rule_unexplained_weeks", "result": r, "value": len(bad_dates),
-                        "weeks": bad_dates, "threshold": max_unexp})
-        result = combine([s["result"] for s in sub])
+        bad_dates = []
+        for w in table.index[~table[approved_rule]]:
+            start = datetime.fromisoformat(week_start_date(w))
+            days = {(start + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)}
+            if not days & confirmed_holidays:
+                bad_dates.append(week_start_date(w))
+        r = UNKNOWN if max_unexp is None else (PASS if len(bad_dates) <= max_unexp else FAIL)
+        sub.append({"check": "approved_rule_unexplained_weeks", "result": r, "value": len(bad_dates),
+                    "weeks": bad_dates, "threshold": max_unexp, "frame": frame})
+    result = combine([x["result"] for x in sub])
+    sub.append(nfp_sub)  # evidence only; deliberately outside combine()
     return CriterionResult("C4", "Saat doğruluğu", result, method, metrics, sub_results=sub,
                            evidence=evidence, notes=notes, tables=tables), table

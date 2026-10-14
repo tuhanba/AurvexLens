@@ -26,10 +26,16 @@ tick_probe_max_months = 180   # monthly 1h tick probes going back
 tick_probe_stop_after_empty = 3
 tick_full_days = 10           # recent full ticks for spread / bid-ask analysis
 live_probe_samples = 10       # 1 s apart, for C3/C4
+commission_history_days = 180 # deal window for commission aggregates (D-COMM); only aggregates are stored
+ntp_probe = false             # D-NTP: true runs `w32tm /stripchart /computer:time.windows.com` (EXTERNAL NTP query)
 
 [analysis]
-closure_min_recurrence = 8    # gap pattern repeats >= N times -> CLOSURE_CANDIDATE (method param, proposed)
-reference_tz = "America/New_York"  # frame in which session anchors should be constant (assumption, see docs/02)
+# PROPOSED — user approval pending: gap pattern repeating >= N times -> CLOSURE_CANDIDATE
+closure_min_recurrence = 8
+reference_tz = "America/New_York"  # D-C4 decision; report also shows the UTC frame side by side
+# D-NFP: official BLS release calendar, CSV header `date,release_time_et` (e.g. 2026-03-06,08:30).
+# Not set / missing -> NFP check UNKNOWN. First-Friday approximation is never evidence.
+# nfp_calendar_path = 'C:\AurvexLens\inputs\bls_empsit_calendar.csv'
 server_rule_base_offsets = [0, 1, 2, 3]
 
 [confirmations]
@@ -40,6 +46,8 @@ holiday_dates = []            # e.g. ["2025-12-25"] (server date)
 # thresholds_approved_sha256 = "" # O2 — sha256 of config/quality_thresholds.toml once approved
 
 [official_costs.commission]
+# Round-turn commission per lot from the official FTMO source. source_url AND verified_date are required,
+# otherwise the value is ignored. Compared with the deal-derived round-turn median (absolute values).
 # commission_per_lot_round_turn = 0.0
 # source_url = ""
 # verified_date = ""

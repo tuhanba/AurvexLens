@@ -37,6 +37,7 @@ class SnapshotWriter:
         self.dir.mkdir(exist_ok=False)  # never reuse an extraction folder
         self.files: list[dict[str, Any]] = []
         self._finalized = False
+        self.status: str | None = None
 
     def _write_bytes(self, name: str, data: bytes) -> str:
         if self._finalized:
@@ -73,6 +74,7 @@ class SnapshotWriter:
         }
         self._write_bytes("meta.json", dumps(full).encode("utf-8"))
         self._finalized = True
+        self.status = full.get("status")
         for p in self.dir.iterdir():
             os.chmod(p, stat.S_IREAD | stat.S_IRGRP | stat.S_IROTH)
         return self.dir
@@ -97,7 +99,8 @@ def verify_snapshot(snapshot_dir: Path) -> list[dict[str, Any]]:
 
 def latest_snapshot(data_dir: Path) -> Path:
     raw = Path(data_dir) / "raw"
-    dirs = sorted(p for p in raw.iterdir() if (p / "meta.json").exists()) if raw.exists() else []
+    dirs = sorted(p for p in raw.iterdir()
+                  if (p / "meta.json").exists() and load_meta(p).get("status") == "COMPLETE") if raw.exists() else []
     if not dirs:
-        raise SnapshotError(f"no finalized snapshot under {raw}")
+        raise SnapshotError(f"no COMPLETE snapshot under {raw}")
     return dirs[-1]

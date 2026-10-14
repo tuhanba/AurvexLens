@@ -28,11 +28,12 @@ max_unexplained_weeks = 0
 # PROPOSED (Phase 1 requirement)
 require_spread_from_ticks = true
 required_verified = ["commission", "contract"]
+# PROPOSED — user approval pending. |deal round-turn median| vs |official| per lot, account currency.
+commission_match_tolerance = 0.01
 
 [extra]
-# NOT IN SPEC §6.2 — added by implementation, user decision needed.
+# PROPOSED — user approval pending (not in spec §6.2; kept by decision D-THR).
 # C6 (informational): share of M1 bars whose OHLC equals tick-derived bid OHLC.
 c6_min_bid_match_ratio = 0.999
-# C2 cross-timeframe consistency (M1 resampled vs terminal TF). Uncomment to make it a check;
-# while commented it is only reported.
-# cross_tf_max_price_mismatch_ratio = 0.0
+# C2 cross-timeframe consistency (M1 resampled vs terminal TF): Phase 0 REPORTS ONLY (D-THR).
+# Threshold to be fixed before Phase 1 without looking at results (open decision O9). Do not set here yet.

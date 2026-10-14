@@ -55,21 +55,22 @@ def tf_coverage(tf: str, df: pd.DataFrame | None, file_info: dict | None, min_mo
 
 def tick_coverage(probes_doc: dict | None, ticks_probe: pd.DataFrame | None) -> dict[str, Any]:
     if not probes_doc or "probes" not in probes_doc:
-        return {"result": "REPORTED_ONLY", "status": UNKNOWN, "reason": "no tick probes in snapshot"}
+        return {"status": UNKNOWN, "reason": "no tick probes in snapshot"}
     probes = probes_doc["probes"]
-    with_ticks = [p for p in probes if p["ticks"] > 0]
-    earliest = min((p["window_start_server"] for p in with_ticks), default=None)
-    empty_between = 0
-    if with_ticks:
-        latest = max(p["window_start_server"] for p in with_ticks)
-        empty_between = sum(1 for p in probes if earliest <= p["window_start_server"] <= latest and p["ticks"] == 0)
+    found = [p for p in probes if p["status"] == "TICKS_FOUND"]
+    by_status: dict[str, int] = {}
+    for p in probes:
+        by_status[p["status"]] = by_status.get(p["status"], 0) + 1
     return {
         "method": probes_doc.get("method"), "stop_rule": probes_doc.get("stop_rule"),
-        "windows_probed": len(probes), "windows_with_ticks": len(with_ticks),
-        "earliest_window_with_ticks_server": server_iso(earliest),
-        "empty_windows_inside_covered_range": empty_between,
+        "months_probed": len(probes), "months_by_status": by_status,
+        "months_found_on_retry": sum(1 for p in found if p.get("retry_used")),
+        "earliest_month_with_ticks": min((p["month"] for p in found), default=None),
+        "earliest_window_with_ticks_server": server_iso(min((p["window_start_server"] for p in found), default=None)),
+        "per_month": [{"month": p["month"], "status": p["status"], "ticks": p["ticks"],
+                       "attempts": len(p["attempts"])} for p in probes],
         "probe_ticks_rows": 0 if ticks_probe is None else int(len(ticks_probe)),
-        "note": "Earliest accessible tick date is bounded by monthly sampling (±1 month resolution). No threshold.",
+        "note": "Earliest accessible tick date has ±1 month resolution. No threshold.",
     }
 
 
