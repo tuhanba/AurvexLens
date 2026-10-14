@@ -56,6 +56,7 @@ class FakeMT5:
         self.deals_mode = deals_mode  # normal | fee | nofee | zero | positive | none | denied
         self.live_clock = None  # set to a FakeClock to get ticks that advance with the system clock
         self.live_offset_s = 0
+        self.live_tick_age_s = 0.2
 
     def _rec(self, name):
         self.calls.append(name)
@@ -105,7 +106,7 @@ class FakeMT5:
         self._rec("symbol_info_tick")
         r = synth.ticks().iloc[-1]
         if self.live_clock is not None:  # fresh tick ~0.2 s old at server offset live_offset_s
-            msc = int((self.live_clock.time() + self.live_offset_s - 0.2) * 1000)
+            msc = int((self.live_clock.time() + self.live_offset_s - self.live_tick_age_s) * 1000)
             return Tick(msc // 1000, float(r.bid), float(r.ask), 0.0, 0, msc, 6, 0.0)
         return Tick(int(r.time), float(r.bid), float(r.ask), 0.0, 0, int(r.time_msc), 6, 0.0)
 
@@ -182,9 +183,9 @@ def synthetic_deals(symbol: str, mode: str = "normal") -> tuple:
     Positions 0..2 fully closed (pos 2 closed in two parts), pos 3 open, pos 5 contains an INOUT
     deal (excluded from round turn). Plus a non-trade deal type on the symbol, an other-symbol deal
     and two symbol-less deals (balance type 2, commission type 7).
-    Modes: normal | fee | nofee | zero | positive.
+    Modes: normal | fee | nofee | zero | positive | positive_open (open positions only).
     """
-    comm = {"zero": 0.0, "positive": 2.5}.get(mode, -2.5)
+    comm = {"zero": 0.0, "positive": 2.5, "positive_open": 2.5}.get(mode, -2.5)
     fee = {"fee": -0.5}.get(mode, 0.0)
     rows = []
     t = DEAL_TICKET_BASE
@@ -201,6 +202,9 @@ def synthetic_deals(symbol: str, mode: str = "normal") -> tuple:
         else:
             rows.append(TradeDeal(*common, fee * vol, sym, "", ""))
 
+    if mode == "positive_open":  # only open positions: no round turn available
+        deal(3, 0, 0.3); deal(8, 0, 1.0, typ=1)
+        return tuple(rows)
     deal(0, 0, 1.0); deal(0, 1, 1.0, typ=1)
     deal(1, 0, 0.5, typ=1); deal(1, 1, 0.5)
     deal(2, 0, 2.0); deal(2, 1, 1.0, typ=1); deal(2, 1, 1.0, typ=1)

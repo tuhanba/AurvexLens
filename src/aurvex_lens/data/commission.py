@@ -85,9 +85,9 @@ def aggregate_commission(deals: Any, symbol: str, window_days: int, last_error: 
     rt_fee = [a["fee"] / a["in_vol"] for a in closed]
     del pos  # position ids never leave this function
 
+    measured_totals = [c + f for e in side for c, f in zip(side[e]["comm"], side[e]["fee"], strict=True)]
     per_side = {name: _components(side[e]["comm"], side[e]["fee"] if has_fee else None)
                 for name, e in (("IN", ENTRY_IN), ("OUT", ENTRY_OUT))}
-    measured_totals = [c + f for e in side for c, f in zip(side[e]["comm"], side[e]["fee"], strict=True)]
     out = {
         **base,
         "fee_field_present": has_fee,
@@ -97,6 +97,7 @@ def aggregate_commission(deals: Any, symbol: str, window_days: int, last_error: 
         "round_turn_excluded_positions_inout_or_out_by": excluded_mixed,
         "per_side_per_lot": per_side,
         "round_turn_per_lot": _components(rt_comm, rt_fee if has_fee else None),
+        "per_side_total_per_lot_all": _stats(measured_totals),
         "round_turn_note": "positions fully closed in window, no INOUT/OUT_BY deal: (sum IN+OUT) / IN volume",
         "first_deal_day_server": _day(min(int(d.time) for d in sym)),
         "last_deal_day_server": _day(max(int(d.time) for d in sym)),

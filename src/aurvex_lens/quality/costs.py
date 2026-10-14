@@ -114,6 +114,8 @@ def commission_status(access: dict | None, official: dict, tolerance: float | No
         "tolerance_per_lot": tolerance,
     }
     notes = []
+    if agg.get("fee_field_present") is False:
+        notes.append("FEE_FIELD_ABSENT: deals have no fee field; total = commission only (VERIFIED allowed, D-FEE)")
     if off_val is not None and not off_complete:
         notes.append("official value ignored: source_url and verified_date are required")
     if agg.get("status") == SUSPECT_ZERO:
@@ -121,9 +123,15 @@ def commission_status(access: dict | None, official: dict, tolerance: float | No
         out["reason"] = agg.get("reason")
         out["notes"] = notes
         return out
-    if deal_rt is not None and float(deal_rt) > 0:
+    # D-POS: positive broker median -> CONFLICT; without closed positions use the per-side total median.
+    side_median = (agg.get("per_side_total_per_lot_all") or {}).get("median") if agg.get("status") == "MEASURED" \
+        else None
+    sign_basis, sign_value = ("round_turn_total_median", deal_rt) if deal_rt is not None else \
+        ("per_side_total_median", side_median)
+    if sign_value is not None and float(sign_value) > 0:
         out["status"] = CONFLICT
         out["reason"] = "positive_commission_from_broker"
+        out["sign_check_basis"] = sign_basis
         out["notes"] = notes
         return out
     sources = int(deal_rt is not None) + int(off_complete)

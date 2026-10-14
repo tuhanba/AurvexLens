@@ -23,6 +23,9 @@ max_tick_age_seconds = 10
 # PROPOSED
 require_local_clock_synced = true
 max_unexplained_weeks = 0
+# PROPOSED — user approval pending (D-STALE). Live offset is usable only if the freshest
+# tick−system difference is within this many seconds of a 15-minute multiple.
+live_offset_max_residual_s = 60
 
 [c5]
 # PROPOSED (Phase 1 requirement)

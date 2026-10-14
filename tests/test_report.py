@@ -21,7 +21,7 @@ SYNCED = lambda cmd: "Leap Indicator: 0(no warning)\nSource: time.windows.com\n"
 TRUE_OFFSET_S = 3 * 3600  # US_DST+2 in April 2026
 
 
-def _report(cfg, clock_runner=None, live_offset_s=None, **fake_kw):
+def _report(cfg, clock_runner=None, live_offset_s=None, live_tick_age_s=0.2, **fake_kw):
     """live_offset_s: simulate fresh ticks at this server offset (else ticks are stale)."""
     from tests.fixtures.synthetic import synth
     from tests.fixtures.synthetic.fake_mt5 import FakeClock
@@ -29,7 +29,7 @@ def _report(cfg, clock_runner=None, live_offset_s=None, **fake_kw):
     kw = {"sleep": lambda s: None}
     if live_offset_s is not None:
         clock = FakeClock(synth.END - live_offset_s - 60)  # ~1 min before the last synthetic bar
-        fake.live_clock, fake.live_offset_s = clock, live_offset_s
+        fake.live_clock, fake.live_offset_s, fake.live_tick_age_s = clock, live_offset_s, live_tick_age_s
         kw = {"sleep": clock.sleep, "clock": clock.time}
     assert cmd_extract(cfg, backend=fake, data_origin="SYNTHETIC", clock_runner=clock_runner, **kw) == 0
     out = build_report(latest_snapshot(cfg.data_dir), cfg, THRESHOLDS)
@@ -295,13 +295,19 @@ def test_c4_matching_official_nfp_adds_no_conflict(tmp_path):
     ("zero", "SUSPECT_ZERO", lambda a: "separate deal type" in a["reason"]
      and a["no_symbol_deal_type_counts"] == {"2": 1, "7": 1}),
     ("positive", "CONFLICT", lambda a: a["round_turn_per_lot"]["total"]["median"] == 5.0),
+    ("positive_open", "CONFLICT", lambda a: a["round_turn_per_lot"]["total"]["n"] == 0
+     and a["per_side_total_per_lot_all"]["median"] == 2.5),
 ])
 def test_commission_modes(make_cfg, mode, status, check):
     _, doc, _ = _report(make_cfg(), deals_mode=mode)
     com = _crit(doc, "C5")["metrics"]["commission"]
     assert com["status"] == status
-    if mode == "positive":
+    if mode.startswith("positive"):
         assert com["reason"] == "positive_commission_from_broker"
+        assert com["sign_check_basis"] == ("per_side_total_median" if mode == "positive_open"
+                                           else "round_turn_total_median")
+    if mode == "nofee":
+        assert any(n.startswith("FEE_FIELD_ABSENT") for n in com["notes"])
     assert check(com["deal_aggregates"])
     sub = {x["check"]: x for x in _crit(doc, "C5")["sub_results"]}
     assert sub["commission_verified"]["result"] == "FAIL"
@@ -314,3 +320,49 @@ def test_suspect_zero_never_verified_even_with_official(tmp_path):
     _write_official(p, 0.0)
     _, doc, _ = _report(load_config(p), deals_mode="zero")
     assert _crit(doc, "C5")["metrics"]["commission"]["status"] == "SUSPECT_ZERO"
+
+
+def test_c4_residual_too_large_is_unknown(make_cfg):
+    # fresh-changing ticks, but each tick is 120 s old -> |residual| 120 s > 60 s (D-STALE)
+    _, doc, _ = _report(make_cfg(confirmations=CONFIRMED), clock_runner=SYNCED,
+                        live_offset_s=TRUE_OFFSET_S, live_tick_age_s=120)
+    c4, sub = _c4(doc)
+    lo = c4["metrics"]["current_server_offset"]
+    assert lo["status"] == "RESIDUAL_TOO_LARGE" and abs(lo["residual_s"]) > 60 and lo["max_residual_s"] == 60
+    assert sub["approved_rule_matches_live_offset"]["result"] == "UNKNOWN"
+    assert c4["result"] == "UNKNOWN"
+
+
+def test_c4_residual_within_limit_still_measured(make_cfg):
+    _, doc, _ = _report(make_cfg(confirmations=CONFIRMED), clock_runner=SYNCED,
+                        live_offset_s=TRUE_OFFSET_S, live_tick_age_s=30)
+    c4, sub = _c4(doc)
+    assert c4["metrics"]["current_server_offset"]["status"] == "MEASURED"
+    assert c4["result"] == "PASS"
+
+
+def test_fee_absent_still_verifiable(tmp_path):
+    from aurvex_lens.common.config import load_config
+    from tests.conftest import write_config
+    p = write_config(tmp_path)
+    _write_official(p, 5.0)
+    _, doc, _ = _report(load_config(p), deals_mode="nofee")
+    com = _crit(doc, "C5")["metrics"]["commission"]
+    assert com["status"] == "VERIFIED"
+    assert any(n.startswith("FEE_FIELD_ABSENT") for n in com["notes"])
+
+
+def test_nfp_calendar_without_dates_in_range(tmp_path):
+    from aurvex_lens.common.config import load_config
+    from tests.conftest import write_config
+    cal = tmp_path / "bls.csv"
+    cal.write_text("date,release_time_et\n2025-06-06,08:30\n2027-01-08,08:30\n")
+    p = write_config(tmp_path, confirmations=CONFIRMED)
+    p.write_text(p.read_text().replace("[analysis]", f"[analysis]\nnfp_calendar_path = '{cal.as_posix()}'"))
+    _, doc, md = _report(load_config(p), clock_runner=SYNCED, live_offset_s=TRUE_OFFSET_S)
+    c4, sub = _c4(doc)
+    assert c4["metrics"]["nfp_official"]["calendar_status"] == "NO_NFP_IN_RANGE"
+    nfp = next(x for k, x in sub.items() if k.startswith("nfp_official_calendar"))
+    assert nfp["calendar_status"] == "NO_NFP_IN_RANGE"
+    assert "nfp_official_conflict" not in sub
+    assert "NO_NFP_IN_RANGE" in md

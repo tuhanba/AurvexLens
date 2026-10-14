@@ -199,7 +199,7 @@ def nfp_check(bars: pd.DataFrame | None, tf_min: int, rules: list[str],
     return res
 
 
-def live_offset(live: dict | None) -> dict[str, Any]:
+def live_offset(live: dict | None, max_residual_s: float | None = None) -> dict[str, Any]:
     """Current server offset from the live probe.
 
     MEASURED only if the tick time changed at least once during the probe
@@ -221,9 +221,16 @@ def live_offset(live: dict | None) -> dict[str, Any]:
                 "reason": "tick time did not change during the probe (market closed?) — offset not measurable"}
     best = max(diffs)
     rounded = round(best / 900) * 900
-    return {**base, "status": "MEASURED", "freshest_raw_diff_s": best, "rounded_offset_s": int(rounded),
-            "rounded_offset_h": rounded / 3600, "residual_s": best - rounded,
-            "note": "server tick time − system UTC at the freshest sample, rounded to 15 min"}
+    out = {**base, "status": "MEASURED", "freshest_raw_diff_s": best, "rounded_offset_s": int(rounded),
+           "rounded_offset_h": rounded / 3600, "residual_s": best - rounded, "max_residual_s": max_residual_s,
+           "note": "server tick time − system UTC at the freshest sample, rounded to 15 min"}
+    if max_residual_s is None:
+        return {**out, "status": UNKNOWN, "reason": "no c4.live_offset_max_residual_s configured"}
+    if abs(out["residual_s"]) > max_residual_s:
+        return {**out, "status": "RESIDUAL_TOO_LARGE",
+                "reason": f"|residual| {abs(out['residual_s']):.1f} s > {max_residual_s} s — tick latency/age too "
+                          "large for a reliable 15-min rounding"}
+    return out
 
 
 def _frame_summary(table: pd.DataFrame, rule: str) -> dict[str, int]:
@@ -238,7 +245,7 @@ def evaluate_c4(event_tf: str | None, event_gaps: pd.DataFrame | None, event_bar
                 evidence: list[str], nfp_calendar: dict | None = None) -> tuple[CriterionResult, pd.DataFrame]:
     rules = candidate_rules(base_offsets)
     other_frame = "UTC" if frame != "UTC" else "America/New_York"
-    lo = live_offset(live)
+    lo = live_offset(live, thresholds.get("c4", {}).get("live_offset_max_residual_s"))
     clock = clock or {}
     clock_status = clock.get("status", UNKNOWN)
     nfp_calendar = nfp_calendar or {"status": UNKNOWN, "reason": "not provided", "events": []}
@@ -288,7 +295,10 @@ def evaluate_c4(event_tf: str | None, event_gaps: pd.DataFrame | None, event_bar
     official_hits = lambda r: r["nfp_hits_official"] if isinstance(r["nfp_hits_official"], int) else 0  # noqa: E731
     ranked = sorted(rows, key=lambda r: (r[f"unexplained [{frame}]"], -official_hits(r),
                                          r["consistent_with_live_offset"] is not True))
-    metrics["nfp_official"] = {"calendar_status": nfp_calendar["status"], "reason": nfp_calendar.get("reason"),
+    nfp_status = nfp_calendar["status"]
+    if nfp_status == "LOADED" and not nfp_official["candidates"]:
+        nfp_status = "NO_NFP_IN_RANGE"  # calendar loaded, but none of its dates fall inside the bar data
+    metrics["nfp_official"] = {"calendar_status": nfp_status, "reason": nfp_calendar.get("reason"),
                                "calendar_path": nfp_calendar.get("path"), "calendar_sha256": nfp_calendar.get("sha256"),
                                **nfp_official}
     metrics["nfp_approx_not_evidence"] = {**nfp_approx, "label": "approx — not evidence",
@@ -306,7 +316,7 @@ def evaluate_c4(event_tf: str | None, event_gaps: pd.DataFrame | None, event_bar
     sub.append({"check": "local_clock_synced", "result": clock_res,
                 "method": ", ".join(clock.get("methods_used", [])) or "none"})
     nfp_sub = {"check": "nfp_official_calendar (evidence, non-gating)", "result": UNKNOWN,
-               "calendar_status": nfp_calendar["status"], "gating": False}
+               "calendar_status": nfp_status, "gating": False}
     if nfp_calendar["status"] == "LOADED" and approved_rule:
         nfp_sub["hits"] = nfp_official["per_rule_hits"].get(approved_rule)
         nfp_sub["candidates"] = nfp_official["candidates"]
