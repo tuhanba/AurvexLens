@@ -53,7 +53,9 @@ class FakeMT5:
         self.maxbars = maxbars
         self.symbol = symbol
         self.symbol_visible = symbol_visible
-        self.deals_mode = deals_mode  # "normal" | "none" | "denied"
+        self.deals_mode = deals_mode  # normal | fee | nofee | zero | positive | none | denied
+        self.live_clock = None  # set to a FakeClock to get ticks that advance with the system clock
+        self.live_offset_s = 0
 
     def _rec(self, name):
         self.calls.append(name)
@@ -102,6 +104,9 @@ class FakeMT5:
     def symbol_info_tick(self, symbol):
         self._rec("symbol_info_tick")
         r = synth.ticks().iloc[-1]
+        if self.live_clock is not None:  # fresh tick ~0.2 s old at server offset live_offset_s
+            msc = int((self.live_clock.time() + self.live_offset_s - 0.2) * 1000)
+            return Tick(msc // 1000, float(r.bid), float(r.ask), 0.0, 0, msc, 6, 0.0)
         return Tick(int(r.time), float(r.bid), float(r.ask), 0.0, 0, int(r.time_msc), 6, 0.0)
 
     def copy_rates_from_pos(self, symbol, timeframe, start_pos, count):
@@ -131,7 +136,7 @@ class FakeMT5:
 
     def history_deals_total(self, date_from, date_to):
         self._rec("history_deals_total")
-        return 9
+        return 0 if self.deals_mode in ("none", "denied") else len(synthetic_deals(self.symbol, self.deals_mode))
 
     def history_deals_get(self, date_from, date_to):
         self._rec("history_deals_get")
@@ -139,7 +144,7 @@ class FakeMT5:
             return None
         if self.deals_mode == "none":
             return ()
-        return synthetic_deals(self.symbol)
+        return synthetic_deals(self.symbol, self.deals_mode)
 
     def positions_total(self):
         self._rec("positions_total")
@@ -165,24 +170,57 @@ DEAL_POSITION_BASE = 7_700_000
 DEAL_PRICE = 31.41593
 DEAL_PROFIT = 271.828
 DEAL_TIME = 1_773_000_123
+BALANCE_AMOUNT = 123_456.78
+TradeDealNoFee = namedtuple("TradeDeal", "ticket order time time_msc type entry magic position_id reason volume "
+                            "price commission swap profit symbol comment external_id")
 
 
-def synthetic_deals(symbol: str) -> tuple:
-    """SYNTHETIC — NOT MARKET DATA. Commission -2.5 per lot per side -> round turn -5.0/lot.
-    Positions 0..2 fully closed (pos 2 closed in two parts), pos 3 still open, plus one other-symbol deal."""
+def synthetic_deals(symbol: str, mode: str = "normal") -> tuple:
+    """SYNTHETIC — NOT MARKET DATA.
+
+    Commission -2.5 per lot per side (round turn -5.0); fee 0 (mode "fee": -0.5/lot/side).
+    Positions 0..2 fully closed (pos 2 closed in two parts), pos 3 open, pos 5 contains an INOUT
+    deal (excluded from round turn). Plus a non-trade deal type on the symbol, an other-symbol deal
+    and two symbol-less deals (balance type 2, commission type 7).
+    Modes: normal | fee | nofee | zero | positive.
+    """
+    comm = {"zero": 0.0, "positive": 2.5}.get(mode, -2.5)
+    fee = {"fee": -0.5}.get(mode, 0.0)
     rows = []
     t = DEAL_TICKET_BASE
 
-    def deal(pos, entry, vol, sym=symbol, comm_per_lot=-2.5):
+    def deal(pos, entry, vol, sym=symbol, typ=0, c=None, profit=None):
         nonlocal t
         t += 1
-        rows.append(TradeDeal(t, t, DEAL_TIME + t % 1000, (DEAL_TIME + t % 1000) * 1000, 0, entry, 0,
-                              DEAL_POSITION_BASE + pos, 0, vol, DEAL_PRICE, comm_per_lot * vol, 0.0,
-                              DEAL_PROFIT if entry == 1 else 0.0, 0.0, sym, "", ""))
+        c = comm if c is None else c
+        pr = profit if profit is not None else (DEAL_PROFIT if entry == 1 else 0.0)
+        common = (t, t, DEAL_TIME + t % 1000, (DEAL_TIME + t % 1000) * 1000, typ, entry, 0,
+                  DEAL_POSITION_BASE + pos, 0, vol, DEAL_PRICE, c * vol, 0.0, pr)
+        if mode == "nofee":
+            rows.append(TradeDealNoFee(*common, sym, "", ""))
+        else:
+            rows.append(TradeDeal(*common, fee * vol, sym, "", ""))
 
-    deal(0, 0, 1.0); deal(0, 1, 1.0)
-    deal(1, 0, 0.5); deal(1, 1, 0.5)
-    deal(2, 0, 2.0); deal(2, 1, 1.0); deal(2, 1, 1.0)
+    deal(0, 0, 1.0); deal(0, 1, 1.0, typ=1)
+    deal(1, 0, 0.5, typ=1); deal(1, 1, 0.5)
+    deal(2, 0, 2.0); deal(2, 1, 1.0, typ=1); deal(2, 1, 1.0, typ=1)
     deal(3, 0, 0.3)
-    deal(4, 0, 1.0, sym="EURUSD", comm_per_lot=-9.0)
+    deal(5, 0, 1.0); deal(5, 2, 2.0, typ=1); deal(5, 1, 1.0)
+    deal(6, 0, 0.0, typ=6, c=0.0)                       # non-trade deal type on the symbol
+    deal(4, 0, 1.0, sym="EURUSD", c=-9.0)
+    deal(0, 0, 0.0, sym="", typ=2, c=0.0, profit=BALANCE_AMOUNT)   # balance
+    deal(0, 0, 0.0, sym="", typ=7, c=0.0, profit=-12.34)           # commission booked separately
     return tuple(rows)
+
+
+class FakeClock:
+    """Deterministic system clock for the live probe: sleep() advances time()."""
+
+    def __init__(self, start: float):
+        self.t = float(start)
+
+    def time(self) -> float:
+        return self.t
+
+    def sleep(self, s: float) -> None:
+        self.t += s

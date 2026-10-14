@@ -234,10 +234,11 @@ def windows_clock_status(runner: Callable[[list[str]], str] | None = None, ntp_p
     return out
 
 
-def live_probe(mt5: ReadOnlyMT5, symbol: str, samples: int, sleep: Callable[[float], None]) -> dict[str, Any]:
+def live_probe(mt5: ReadOnlyMT5, symbol: str, samples: int, sleep: Callable[[float], None],
+               clock: Callable[[], float] = time.time) -> dict[str, Any]:
     out = []
     for i in range(samples):
-        sys_ms = int(time.time() * 1000)
+        sys_ms = int(clock() * 1000)
         tick = mt5.symbol_info_tick(symbol)
         ti = mt5.terminal_info()
         out.append({
@@ -297,7 +298,8 @@ def symbol_snapshot(mt5: ReadOnlyMT5, symbol: str) -> dict[str, Any]:
 
 def run_extraction(mt5: ReadOnlyMT5, cfg: LensConfig, identity: dict[str, Any], extraction_id: str,
                    data_origin: str, sleep: Callable[[float], None] = time.sleep,
-                   clock_runner: Callable[[list[str]], str] | None = None) -> SnapshotWriter:
+                   clock_runner: Callable[[list[str]], str] | None = None,
+                   clock: Callable[[], float] = time.time) -> SnapshotWriter:
     started = utc_iso()
     writer = SnapshotWriter(cfg.data_dir, extraction_id, data_origin)
     ti = mt5.terminal_info()
@@ -311,7 +313,7 @@ def run_extraction(mt5: ReadOnlyMT5, cfg: LensConfig, identity: dict[str, Any], 
         return writer
 
     writer.write_json("clock_status.json", windows_clock_status(clock_runner, cfg.ntp_probe))
-    writer.write_json("live_probe.json", live_probe(mt5, cfg.symbol, cfg.live_probe_samples, sleep))
+    writer.write_json("live_probe.json", live_probe(mt5, cfg.symbol, cfg.live_probe_samples, sleep, clock))
 
     maxbars = getattr(ti, "maxbars", None)
     for tf in cfg.timeframes:

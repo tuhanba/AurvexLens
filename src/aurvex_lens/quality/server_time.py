@@ -200,18 +200,30 @@ def nfp_check(bars: pd.DataFrame | None, tf_min: int, rules: list[str],
 
 
 def live_offset(live: dict | None) -> dict[str, Any]:
+    """Current server offset from the live probe.
+
+    MEASURED only if the tick time changed at least once during the probe
+    (proof that ticks were fresh); otherwise STALE_TICKS (market closed or
+    feed stopped) and the offset is not usable. The freshest sample (largest
+    server−system difference) is rounded to 15 minutes.
+    """
     if not live or not live.get("samples"):
-        return {"status": UNKNOWN}
-    diffs = [x["tick_time_msc_server"] / 1000 - x["system_utc_ms"] / 1000 for x in live["samples"]
-             if x["tick_time_msc_server"] is not None]
-    if not diffs:
-        return {"status": UNKNOWN}
-    med = float(np.median(diffs))
-    rounded = round(med / 900) * 900
-    return {"status": "MEASURED", "median_raw_diff_s": med, "rounded_offset_s": int(rounded),
-            "rounded_offset_h": rounded / 3600, "residual_s": med - rounded,
-            "system_utc_ms": live["samples"][-1]["system_utc_ms"],
-            "note": "server tick time − system UTC; residual includes tick staleness (large if market closed)"}
+        return {"status": UNKNOWN, "reason": "no live probe"}
+    smp = [x for x in live["samples"] if x["tick_time_msc_server"] is not None]
+    if not smp:
+        return {"status": UNKNOWN, "reason": "no tick in live probe"}
+    diffs = [x["tick_time_msc_server"] / 1000 - x["system_utc_ms"] / 1000 for x in smp]
+    tick_changes = len({x["tick_time_msc_server"] for x in smp}) - 1
+    base = {"samples": len(smp), "tick_time_changes": tick_changes, "median_raw_diff_s": float(np.median(diffs)),
+            "system_utc_ms": smp[-1]["system_utc_ms"]}
+    if tick_changes == 0:
+        return {**base, "status": "STALE_TICKS",
+                "reason": "tick time did not change during the probe (market closed?) — offset not measurable"}
+    best = max(diffs)
+    rounded = round(best / 900) * 900
+    return {**base, "status": "MEASURED", "freshest_raw_diff_s": best, "rounded_offset_s": int(rounded),
+            "rounded_offset_h": rounded / 3600, "residual_s": best - rounded,
+            "note": "server tick time − system UTC at the freshest sample, rounded to 15 min"}
 
 
 def _frame_summary(table: pd.DataFrame, rule: str) -> dict[str, int]:
@@ -299,6 +311,24 @@ def evaluate_c4(event_tf: str | None, event_gaps: pd.DataFrame | None, event_bar
         nfp_sub["hits"] = nfp_official["per_rule_hits"].get(approved_rule)
         nfp_sub["candidates"] = nfp_official["candidates"]
         nfp_sub["result"] = "REPORTED"
+    # Gating: approved rule must agree with the live offset (anchors alone cannot pin the base offset).
+    if approved_rule:
+        if lo.get("status") != "MEASURED":
+            sub.append({"check": "approved_rule_matches_live_offset", "result": UNKNOWN,
+                        "live_offset_status": lo.get("status"), "reason": lo.get("reason")})
+        else:
+            rule_off = int(rule_offset_s(approved_rule, np.array([lo["system_utc_ms"] // 1000]))[0])
+            sub.append({"check": "approved_rule_matches_live_offset",
+                        "result": PASS if rule_off == lo["rounded_offset_s"] else FAIL,
+                        "rule_offset_h": rule_off / 3600, "live_offset_h": lo["rounded_offset_h"]})
+        # Official NFP pointing elsewhere blocks PASS (only when the calendar is loaded).
+        if nfp_calendar["status"] == "LOADED" and nfp_official["candidates"]:
+            hits = nfp_official["per_rule_hits"]
+            best = max(hits.values())
+            if hits.get(approved_rule, 0) < best:
+                sub.append({"check": "nfp_official_conflict", "result": UNKNOWN,
+                            "approved_rule_hits": hits.get(approved_rule, 0), "best_hits": best,
+                            "best_rules": sorted(r for r, h in hits.items() if h == best)})
     if not approved_rule:
         sub.append({"check": "approved_rule", "result": UNKNOWN, "reason": "O3 not approved by user"})
     elif approved_rule not in table.columns:

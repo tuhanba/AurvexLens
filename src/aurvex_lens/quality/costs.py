@@ -1,7 +1,8 @@
 """C5 — cost data sufficiency; C6 — bid/ask basis of bar OHLC (informational).
 
 Source status per component: VERIFIED (two independent sources agree),
-SINGLE_SOURCE, MISSING, CONFLICT (two sources disagree — never VERIFIED).
+SINGLE_SOURCE, MISSING, CONFLICT (two sources disagree — never VERIFIED),
+SUSPECT_ZERO (every measured commission+fee is 0 — never VERIFIED).
 Bar `spread` is never assumed to be the real spread; it is labelled
 "indicative" until its relation to tick spread is measured.
 """
@@ -16,6 +17,7 @@ import pandas as pd
 from aurvex_lens.quality.result import FAIL, PASS, UNKNOWN, CriterionResult
 
 VERIFIED, SINGLE_SOURCE, MISSING, CONFLICT = "VERIFIED", "SINGLE_SOURCE", "MISSING", "CONFLICT"
+SUSPECT_ZERO = "SUSPECT_ZERO"  # never VERIFIED / PASS
 
 CONTRACT_FIELDS = ("trade_contract_size", "trade_tick_size", "trade_tick_value", "volume_min",
                    "volume_step", "volume_max", "digits", "point")
@@ -98,10 +100,11 @@ def _compare(sym: dict, official: dict, fields: tuple[str, ...]) -> dict[str, An
 
 
 def commission_status(access: dict | None, official: dict, tolerance: float | None) -> dict[str, Any]:
-    """D-COMM: deal-derived round-turn median vs official value (with source URL + date).
-    Comparison on absolute values (brokers report commission as a negative charge)."""
+    """D-COMM / D-COMM2: deal-derived round-turn total (commission + fee) median vs official value
+    (with source URL + date). Compared on absolute values; a positive broker median is a CONFLICT."""
     agg = (access or {}).get("commission") or {"status": MISSING, "reason": "access probe missing"}
-    deal_rt = (agg.get("round_turn_per_lot") or {}).get("median") if agg.get("status") == "MEASURED" else None
+    rt_total = ((agg.get("round_turn_per_lot") or {}).get("total") or {}).get("median")
+    deal_rt = rt_total if agg.get("status") == "MEASURED" else None
     off_val = official.get("commission_per_lot_round_turn")
     off_complete = off_val is not None and bool(official.get("source_url")) and bool(official.get("verified_date"))
     out: dict[str, Any] = {
@@ -113,6 +116,16 @@ def commission_status(access: dict | None, official: dict, tolerance: float | No
     notes = []
     if off_val is not None and not off_complete:
         notes.append("official value ignored: source_url and verified_date are required")
+    if agg.get("status") == SUSPECT_ZERO:
+        out["status"] = SUSPECT_ZERO
+        out["reason"] = agg.get("reason")
+        out["notes"] = notes
+        return out
+    if deal_rt is not None and float(deal_rt) > 0:
+        out["status"] = CONFLICT
+        out["reason"] = "positive_commission_from_broker"
+        out["notes"] = notes
+        return out
     sources = int(deal_rt is not None) + int(off_complete)
     if sources == 0:
         out["status"] = MISSING

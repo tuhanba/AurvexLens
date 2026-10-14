@@ -14,14 +14,24 @@ from aurvex_lens.quality.result import UNAPPROVED_TZ_LABEL
 from tests.conftest import THRESHOLDS
 from tests.fixtures.synthetic.fake_mt5 import FakeMT5
 
-CONFIRMED = ('closures = ["Sat 00:00 -> Mon 01:00", "Tue 00:00 -> Tue 01:00", "Wed 00:00 -> Wed 01:00", '
-             '"Thu 00:00 -> Thu 01:00", "Fri 00:00 -> Fri 01:00"]\nholiday_dates = ["2026-04-03"]\n'
-             'server_time_rule = "US_DST+2"')
+CLOSURES = ('closures = ["Sat 00:00 -> Mon 01:00", "Tue 00:00 -> Tue 01:00", "Wed 00:00 -> Wed 01:00", '
+            '"Thu 00:00 -> Thu 01:00", "Fri 00:00 -> Fri 01:00"]\nholiday_dates = ["2026-04-03"]\n')
+CONFIRMED = CLOSURES + 'server_time_rule = "US_DST+2"'
+SYNCED = lambda cmd: "Leap Indicator: 0(no warning)\nSource: time.windows.com\n"  # noqa: E731
+TRUE_OFFSET_S = 3 * 3600  # US_DST+2 in April 2026
 
 
-def _report(cfg, clock_runner=None, **fake_kw):
-    assert cmd_extract(cfg, backend=FakeMT5(**fake_kw), data_origin="SYNTHETIC", sleep=lambda s: None,
-                       clock_runner=clock_runner) == 0
+def _report(cfg, clock_runner=None, live_offset_s=None, **fake_kw):
+    """live_offset_s: simulate fresh ticks at this server offset (else ticks are stale)."""
+    from tests.fixtures.synthetic import synth
+    from tests.fixtures.synthetic.fake_mt5 import FakeClock
+    fake = FakeMT5(**fake_kw)
+    kw = {"sleep": lambda s: None}
+    if live_offset_s is not None:
+        clock = FakeClock(synth.END - live_offset_s - 60)  # ~1 min before the last synthetic bar
+        fake.live_clock, fake.live_offset_s = clock, live_offset_s
+        kw = {"sleep": clock.sleep, "clock": clock.time}
+    assert cmd_extract(cfg, backend=fake, data_origin="SYNTHETIC", clock_runner=clock_runner, **kw) == 0
     out = build_report(latest_snapshot(cfg.data_dir), cfg, THRESHOLDS)
     return out, json.loads((out / "report.json").read_text(encoding="utf-8")), (out / "report.md").read_text(
         encoding="utf-8")
@@ -152,9 +162,11 @@ def test_commission_verification(tmp_path, value, with_source, expected):
     com = _crit(doc, "C5")["metrics"]["commission"]
     assert com["status"] == expected
     agg = com["deal_aggregates"]
-    assert agg["round_turn_per_lot"] == {"n": 3, "median": -5.0, "min": -5.0, "max": -5.0}
-    assert agg["per_side_per_lot"]["IN"]["n"] == 4 and agg["per_side_per_lot"]["OUT"]["n"] == 4
-    assert agg["per_side_per_lot"]["OUT"]["median"] == -2.5
+    assert agg["round_turn_per_lot"]["total"] == {"n": 3, "median": -5.0, "min": -5.0, "max": -5.0}
+    assert agg["per_side_per_lot"]["IN"]["commission"]["n"] == 5  # pos 0,1,2,3,5
+    assert agg["per_side_per_lot"]["OUT"]["total"]["median"] == -2.5
+    assert agg["round_turn_excluded_positions_inout_or_out_by"] == 1
+    assert agg["excluded_non_trade_type"] == 1
 
 
 @pytest.mark.parametrize("mode,reason", [("none", "NO_DEALS"), ("denied", "ACCESS_DENIED")])
@@ -165,17 +177,19 @@ def test_commission_missing_reasons(make_cfg, mode, reason):
     assert com["deal_aggregates"]["reason"] == reason
 
 
-def test_no_individual_deal_data_anywhere(make_cfg, capsys):
+@pytest.mark.parametrize("mode", ["normal", "fee", "nofee", "zero"])
+def test_no_individual_deal_data_anywhere(make_cfg, capsys, mode):
     from tests.fixtures.synthetic import fake_mt5 as F
     cfg = make_cfg()
-    _report(cfg)
+    _report(cfg, deals_mode=mode)
     texts = [capsys.readouterr().out]
     for f in cfg.data_dir.rglob("*"):
         if f.is_file():
             texts.append(f.read_bytes().decode("utf-8", errors="ignore"))
     blob = "\n".join(texts)
     forbidden = [str(F.DEAL_PRICE), str(F.DEAL_PROFIT), str(F.DEAL_TICKET_BASE + 1), str(F.DEAL_POSITION_BASE),
-                 str(F.DEAL_POSITION_BASE + 1), str(F.DEAL_TIME)[:7], "position_id\":", "\"ticket\":"]
+                 str(F.DEAL_POSITION_BASE + 1), str(F.DEAL_POSITION_BASE + 5), str(F.DEAL_TIME)[:7],
+                 str(F.BALANCE_AMOUNT), "12.34", "position_id\":", "\"ticket\":", "\"profit\":", "\"price\":"]
     for token in forbidden:
         assert token not in blob, token
     # but the aggregates are there
@@ -210,11 +224,93 @@ def test_nfp_official_calendar_used(tmp_path):
     assert c4["tables"][0]["rows"][0]["rule"] == "US_DST+2"  # official evidence breaks the tie
 
 
-def test_c4_pass_with_synced_clock_and_approved_rule(make_cfg):
-    synced = lambda cmd: "Leap Indicator: 0(no warning)\nSource: time.windows.com\n"  # noqa: E731
-    _, doc, _ = _report(make_cfg(confirmations=CONFIRMED), clock_runner=synced)
+def _c4(doc):
     c4 = _crit(doc, "C4")
-    assert next(s for s in c4["sub_results"] if s["check"] == "local_clock_synced")["result"] == "PASS"
+    return c4, {x["check"]: x for x in c4["sub_results"]}
+
+
+def test_c4_a_wrong_base_offset_fails_on_live_offset(make_cfg):
+    # NY-frame anchors cannot tell US_DST+1 from US_DST+2; the live offset can.
+    _, doc, _ = _report(make_cfg(confirmations=CLOSURES + 'server_time_rule = "US_DST+1"'),
+                        clock_runner=SYNCED, live_offset_s=TRUE_OFFSET_S)
+    c4, sub = _c4(doc)
+    assert sub["approved_rule_unexplained_weeks"]["result"] == "PASS"  # anchors alone would pass
+    assert sub["approved_rule_matches_live_offset"]["result"] == "FAIL"
+    assert c4["result"] == "FAIL"
+
+
+def test_c4_b_no_live_offset_is_unknown(make_cfg):
+    _, doc, _ = _report(make_cfg(confirmations=CONFIRMED), clock_runner=SYNCED)  # stale ticks
+    c4, sub = _c4(doc)
+    assert c4["metrics"]["current_server_offset"]["status"] == "STALE_TICKS"
+    assert sub["approved_rule_matches_live_offset"]["result"] == "UNKNOWN"
+    assert c4["result"] == "UNKNOWN"
+
+
+def test_c4_c_pass_with_synced_clock_live_offset_and_approved_rule(make_cfg):
+    _, doc, _ = _report(make_cfg(confirmations=CONFIRMED), clock_runner=SYNCED, live_offset_s=TRUE_OFFSET_S)
+    c4, sub = _c4(doc)
+    assert sub["local_clock_synced"]["result"] == "PASS"
+    assert sub["approved_rule_matches_live_offset"]["result"] == "PASS"
+    assert c4["metrics"]["current_server_offset"]["rounded_offset_h"] == 3.0
+    assert "nfp_official_conflict" not in sub  # no calendar -> not added
+    nfp = next(x for k, x in sub.items() if k.startswith("nfp_official_calendar"))
+    assert nfp["result"] == "UNKNOWN" and nfp["gating"] is False
     assert c4["result"] == "PASS"
-    nfp = next(s for s in c4["sub_results"] if s["check"].startswith("nfp_official"))
-    assert nfp["result"] == "UNKNOWN" and nfp["gating"] is False  # evidence only, does not block PASS
+
+
+def test_c4_d_official_nfp_points_elsewhere_is_unknown(tmp_path):
+    from aurvex_lens.common.config import load_config
+    from tests.conftest import write_config
+    cal = tmp_path / "bls.csv"
+    cal.write_text("date,release_time_et\n2026-03-06,09:30\n")  # spike is at 08:30 ET -> favours US_DST+1
+    p = write_config(tmp_path, confirmations=CONFIRMED)
+    p.write_text(p.read_text().replace("[analysis]", f"[analysis]\nnfp_calendar_path = '{cal.as_posix()}'"))
+    _, doc, _ = _report(load_config(p), clock_runner=SYNCED, live_offset_s=TRUE_OFFSET_S)
+    c4, sub = _c4(doc)
+    assert sub["approved_rule_matches_live_offset"]["result"] == "PASS"
+    assert sub["nfp_official_conflict"]["result"] == "UNKNOWN"
+    # 2026-03-06 is winter for both US and EU: every +1 rule ties; the approved +2 rule is not among them
+    assert sub["nfp_official_conflict"]["best_rules"] == ["EU_DST+1", "FIXED+1", "US_DST+1"]
+    assert c4["result"] == "UNKNOWN"
+
+
+def test_c4_matching_official_nfp_adds_no_conflict(tmp_path):
+    from aurvex_lens.common.config import load_config
+    from tests.conftest import write_config
+    cal = tmp_path / "bls.csv"
+    cal.write_text("date,release_time_et\n2026-03-06,08:30\n")
+    p = write_config(tmp_path, confirmations=CONFIRMED)
+    p.write_text(p.read_text().replace("[analysis]", f"[analysis]\nnfp_calendar_path = '{cal.as_posix()}'"))
+    _, doc, _ = _report(load_config(p), clock_runner=SYNCED, live_offset_s=TRUE_OFFSET_S)
+    c4, sub = _c4(doc)
+    assert "nfp_official_conflict" not in sub and c4["result"] == "PASS"
+
+
+@pytest.mark.parametrize("mode,status,check", [
+    ("fee", "SINGLE_SOURCE", lambda a: a["round_turn_per_lot"]["fee"]["median"] == -1.0
+     and a["round_turn_per_lot"]["total"]["median"] == -6.0 and a["per_side_per_lot"]["IN"]["fee"]["median"] == -0.5),
+    ("nofee", "SINGLE_SOURCE", lambda a: a["fee_field_present"] is False
+     and a["round_turn_per_lot"]["fee"]["status"] == "MISSING" and a["round_turn_per_lot"]["total"]["median"] == -5.0),
+    ("zero", "SUSPECT_ZERO", lambda a: "separate deal type" in a["reason"]
+     and a["no_symbol_deal_type_counts"] == {"2": 1, "7": 1}),
+    ("positive", "CONFLICT", lambda a: a["round_turn_per_lot"]["total"]["median"] == 5.0),
+])
+def test_commission_modes(make_cfg, mode, status, check):
+    _, doc, _ = _report(make_cfg(), deals_mode=mode)
+    com = _crit(doc, "C5")["metrics"]["commission"]
+    assert com["status"] == status
+    if mode == "positive":
+        assert com["reason"] == "positive_commission_from_broker"
+    assert check(com["deal_aggregates"])
+    sub = {x["check"]: x for x in _crit(doc, "C5")["sub_results"]}
+    assert sub["commission_verified"]["result"] == "FAIL"
+
+
+def test_suspect_zero_never_verified_even_with_official(tmp_path):
+    from aurvex_lens.common.config import load_config
+    from tests.conftest import write_config
+    p = write_config(tmp_path)
+    _write_official(p, 0.0)
+    _, doc, _ = _report(load_config(p), deals_mode="zero")
+    assert _crit(doc, "C5")["metrics"]["commission"]["status"] == "SUSPECT_ZERO"
