@@ -1,6 +1,6 @@
 # Aurvex Lens — never commit local config, data or logs
-data/
-config/local.toml
+/data/
+/config/local.toml
 *.log
 __pycache__/
 *.py[cod]
