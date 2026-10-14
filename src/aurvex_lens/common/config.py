@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import ntpath
 import tomllib
 from dataclasses import dataclass, field
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 from typing import Any
 
 DEFAULT_CONFIG = Path("config/local.toml")
@@ -16,16 +17,21 @@ class ConfigError(Exception):
 
 
 def normalize_win_path(p: str) -> str:
-    """Case-insensitive, separator-normalized Windows path for comparison."""
-    s = str(p).strip().strip('"').replace("/", "\\").rstrip("\\")
-    return str(PureWindowsPath(s)).lower()
+    """normcase(normpath(p)) with Windows semantics (decision D-I1).
+
+    `ntpath` is what `os.path` is on Windows; using it explicitly keeps the
+    comparison identical when tests/CI run on Linux: case-insensitive,
+    `/` == `\\`, trailing separator and `.`/`..` segments removed.
+    """
+    s = str(p).strip().strip('"')
+    return ntpath.normcase(ntpath.normpath(s))
 
 
 def terminal_dir(terminal_path: str) -> str:
     """`...\\terminal64.exe` -> its folder (what terminal_info().path reports)."""
     norm = normalize_win_path(terminal_path)
     if norm.endswith(".exe"):
-        return str(PureWindowsPath(norm).parent)
+        return ntpath.dirname(norm)
     return norm
 
 
@@ -46,6 +52,9 @@ class LensConfig:
     live_probe_samples: int = 10
     closure_min_recurrence: int = 8
     reference_tz: str = "America/New_York"
+    nfp_calendar_path: Path | None = None
+    commission_history_days: int = 180
+    ntp_probe: bool = False
     server_rule_base_offsets: tuple[int, ...] = (0, 1, 2, 3)
     confirmations: dict[str, Any] = field(default_factory=dict)
     official_costs: dict[str, Any] = field(default_factory=dict)
@@ -56,6 +65,12 @@ def _req(d: dict[str, Any], key: str, where: str) -> Any:
     if key not in d:
         raise ConfigError(f"missing [{where}].{key}")
     return d[key]
+
+
+def _bool(v: Any, where: str) -> bool:
+    if not isinstance(v, bool):
+        raise ConfigError(f"{where} must be true or false")
+    return v
 
 
 def load_config(path: Path = DEFAULT_CONFIG) -> LensConfig:
@@ -101,6 +116,9 @@ def load_config(path: Path = DEFAULT_CONFIG) -> LensConfig:
         live_probe_samples=int(ext.get("live_probe_samples", 10)),
         closure_min_recurrence=int(ana.get("closure_min_recurrence", 8)),
         reference_tz=str(ana.get("reference_tz", "America/New_York")),
+        nfp_calendar_path=Path(ana["nfp_calendar_path"]) if ana.get("nfp_calendar_path") else None,
+        commission_history_days=int(ext.get("commission_history_days", 180)),
+        ntp_probe=_bool(ext.get("ntp_probe", False), "[extract].ntp_probe"),
         server_rule_base_offsets=tuple(ana.get("server_rule_base_offsets", (0, 1, 2, 3))),
         confirmations=raw.get("confirmations", {}),
         official_costs=raw.get("official_costs", {}),

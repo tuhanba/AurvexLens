@@ -102,3 +102,30 @@ def test_config_rejects_password(tmp_path):
     p.write_text(p.read_text().replace("[account]", "[account]\npassword = 'x'"))
     with pytest.raises(ConfigError):
         load_config(p)
+
+
+@pytest.mark.parametrize("cfg_path,observed", [
+    (r"C:\AurvexLens\mt5\terminal64.exe", r"C:\AurvexLens\mt5"),
+    (r"C:/AurvexLens/mt5/terminal64.exe", r"C:\AurvexLens\mt5"),        # forward vs back slash
+    (r"C:\AurvexLens\mt5\terminal64.exe", "C:\\AurvexLens\\mt5\\"),  # trailing separator
+    (r"c:\aurvexlens\MT5\TERMINAL64.EXE", r"C:\AurvexLens\mt5"),        # case
+    (r"C:\AurvexLens\.\mt5\terminal64.exe", r"C:/AurvexLens/mt5/"),
+])
+def test_path_normalization_d_i1(make_cfg, cfg_path, observed):
+    rep = verify_identity(ReadOnlyMT5(FakeMT5(path=observed)), make_cfg(terminal_path=cfg_path))
+    assert _result(rep, "I1_terminal_path") == PASS
+
+
+@pytest.mark.parametrize("forbidden", [
+    r"C:/AurvexLens/mt5/terminal64.exe", "c:\\AURVEXLENS\\mt5\\", r"C:\AurvexLens\mt5",
+])
+def test_forbidden_path_same_normalization(make_cfg, forbidden):
+    fake = FakeMT5()
+    rep = verify_identity(ReadOnlyMT5(fake), make_cfg(forbidden=[forbidden]))
+    assert rep.exit_code == EXIT_FAIL and fake.calls == []
+
+
+def test_normalization_function():
+    from aurvex_lens.common.config import normalize_win_path, terminal_dir
+    assert normalize_win_path("C:/A/B/") == normalize_win_path(r"c:\a\b") == r"c:\a\b"
+    assert terminal_dir(r"C:\X\Y\terminal64.exe") == r"c:\x\y"
