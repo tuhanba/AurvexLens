@@ -20,7 +20,8 @@ Source: `docs/03_phase0_spec.md` §3, §4.
 | I6 | `terminal_info().trade_allowed` (Algo Trading) | `False` | WARN only |
 
 Missing field / `None` / wrong type → `UNKNOWN` → stop and ask the user.
-Exit codes: `0` PASS (warnings allowed), `2` FAIL, `3` UNKNOWN, `4` config error, `5` initialize failed.
+Exit codes: `0` PASS (warnings allowed), `2` FAIL, `3` UNKNOWN, `4` config error, `5` initialize failed,
+`6` symbol not found / not visible in Market Watch (D-MW; `symbol_select` is never used).
 `extract` re-runs these checks on the same connection and reads nothing else if they do not pass.
 
 ## Secondary boundaries (code level — not sufficient alone)
@@ -32,9 +33,12 @@ Exit codes: `0` PASS (warnings allowed), `2` FAIL, `3` UNKNOWN, `4` config error
    Negative tests prove each pattern is detected.
 6. No network server in Phase 0.
 7. Account numbers masked (`****1234`) in reports and console output; balance/equity/name not recorded.
+   Deal history (D-COMM): only commission aggregates and first/last deal day are stored — never ticket,
+   price, profit, position id, per-deal rows or timestamp lists.
 8. No MQL5 scripts/EAs, no terminal setting changes (Market Watch included).
 
 ## Data egress (§4)
-- Phase 0: nothing leaves the machine. No AI call.
+- Phase 0: nothing leaves the machine. No AI call. Exception, opt-in only: `ntp_probe = true` makes
+  `w32tm /stripchart` query `time.windows.com` (an NTP request, no Aurvex data sent). Default false.
 - Phase 1+ (O6, pending): see spec §4 — crop-only chart, structural results; never account number,
   server, balances, positions, credentials, dollar/lot/P&L values; every send logged in `egress_log`.

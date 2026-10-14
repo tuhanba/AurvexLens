@@ -5,6 +5,8 @@ Sürüm: 0.1 · Hazırlanma: 2026-10-14 · Durum: TASLAK
 Ön koşul: §1'deki maddeler kullanıcı tarafından teyit edilmeden canlı MT5 adımları çalıştırılmaz.
 
 > Bu dosya, kullanıcının verdiği AURVEX_LENS_CLAUDECODE_TASKPACK_P0.md belgesinin repodaki kopyasıdır.
+> Düzeltme 2026-10-14 (D-P07, kullanıcı onaylı): P0.7'de `positions_get` → `positions_total`.
+> Sonraki kararlar: `docs/00_decisions.md` → "KARAR — 2026-10-14".
 
 ---
 
@@ -139,7 +141,7 @@ Doğru ifade: **Veriler makineden yalnızca dış AI API'sine gönderildiğinde 
 | P0.4 | Sembol envanteri: `symbol_info` tam döküm, sembol adı eşlemesi | `symbol_snapshot.json` |
 | P0.5 | Ham veri çekimi: H1, M15, M5, M1 için mümkün olan en eski bara kadar; tick için kapsam sondajı | Immutable Parquet snapshot'ları |
 | P0.6 | Kalite ölçümleri (§6) | `report.md` + `report.json` |
-| P0.7 | Erişim sondajı: investor oturumunda `history_deals_get`, `positions_get` ne döndürüyor (yalnızca sayım ve alan adları; içerik rapora girmez) | Raporda bölüm |
+| P0.7 | Erişim sondajı: investor oturumunda `history_deals_get`, `positions_total` ne döndürüyor (yalnızca sayım ve alan adları; içerik rapora girmez — komisyon için yalnızca toplu değerler, bkz. D-COMM) | Raporda bölüm |
 
 ### Zaman damgası kuralı
 MT5 bar `time` alanı broker sunucu saatidir; epoch biçiminde gelir ama UTC **değildir**. Ham veride sütun adı `time_server` olur. `time_utc` sütunu yalnızca saat dilimi kuralı (O3) kullanıcı tarafından onaylandıktan sonra türetilir. Faz 0'da UTC'ye dönüştürülmüş veri "onaylanmamış" etiketi taşır.

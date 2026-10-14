@@ -71,7 +71,7 @@ aurvex-lens report
 
 - `identity` writes `data\reports\identity\<run>\identity_report.json`. Non-zero exit = stop:
   `2` FAIL, `3` UNKNOWN (a field behaved unexpectedly — ask, do not assume), `4` config error,
-  `5` `initialize()` failed.
+  `5` `initialize()` failed, `6` symbol not found / not visible in Market Watch (add it manually in the terminal).
 - `extract` repeats the identity check on the same connection and reads market data only if it passes.
   Output: `data\raw\<extraction_id>\` (never overwritten) with `meta.json` + sha256 per file.
 - `report` is offline (no MT5). Output: `data\reports\<extraction_id>\<report_run>\report.md` / `report.json`.
@@ -81,4 +81,9 @@ aurvex-lens report
 
 Fill `[confirmations]` in `config\local.toml` from what the report shows (closure patterns,
 holiday dates, server-time rule, thresholds sha256) and the `[official_costs.*]` sections
-from the official FTMO sources, then run `aurvex-lens report` again. Nothing is confirmed automatically.
+from the official FTMO sources (value + `source_url` + `verified_date`), set `nfp_calendar_path` to the
+official BLS release calendar CSV (`date,release_time_et`), then run `aurvex-lens report` again.
+Nothing is confirmed automatically.
+
+`extract` reads deal history of the last `commission_history_days` (default 180) and stores only
+commission aggregates. `ntp_probe = true` (default false) additionally queries `time.windows.com`.
