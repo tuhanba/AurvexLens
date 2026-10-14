@@ -19,8 +19,9 @@ CONFIRMED = ('closures = ["Sat 00:00 -> Mon 01:00", "Tue 00:00 -> Tue 01:00", "W
              'server_time_rule = "US_DST+2"')
 
 
-def _report(cfg, **fake_kw):
-    assert cmd_extract(cfg, backend=FakeMT5(**fake_kw), data_origin="SYNTHETIC", sleep=lambda s: None) == 0
+def _report(cfg, clock_runner=None, **fake_kw):
+    assert cmd_extract(cfg, backend=FakeMT5(**fake_kw), data_origin="SYNTHETIC", sleep=lambda s: None,
+                       clock_runner=clock_runner) == 0
     out = build_report(latest_snapshot(cfg.data_dir), cfg, THRESHOLDS)
     return out, json.loads((out / "report.json").read_text(encoding="utf-8")), (out / "report.md").read_text(
         encoding="utf-8")
@@ -116,7 +117,7 @@ def test_confirmed_closures_and_rule(make_cfg):
     c4 = _crit(doc, "C4")
     rule_sub = next(s for s in c4["sub_results"] if s["check"] == "approved_rule_unexplained_weeks")
     assert rule_sub["value"] == 0 and rule_sub["result"] == "PASS"
-    assert c4["result"] == "UNKNOWN"  # local clock status unknown off-Windows
+    assert c4["result"] == "UNKNOWN"  # local clock status unknown (no clock source in tests)
     assert doc["header"]["server_time_rule"] == "US_DST+2"
     assert UNAPPROVED_TZ_LABEL not in md
 
@@ -207,3 +208,13 @@ def test_nfp_official_calendar_used(tmp_path):
     rows = {r["rule"]: r for r in c4["tables"][0]["rows"]}
     assert rows["US_DST+2"]["nfp_hits_official"] == 1 and rows["US_DST+1"]["nfp_hits_official"] == 0
     assert c4["tables"][0]["rows"][0]["rule"] == "US_DST+2"  # official evidence breaks the tie
+
+
+def test_c4_pass_with_synced_clock_and_approved_rule(make_cfg):
+    synced = lambda cmd: "Leap Indicator: 0(no warning)\nSource: time.windows.com\n"  # noqa: E731
+    _, doc, _ = _report(make_cfg(confirmations=CONFIRMED), clock_runner=synced)
+    c4 = _crit(doc, "C4")
+    assert next(s for s in c4["sub_results"] if s["check"] == "local_clock_synced")["result"] == "PASS"
+    assert c4["result"] == "PASS"
+    nfp = next(s for s in c4["sub_results"] if s["check"].startswith("nfp_official"))
+    assert nfp["result"] == "UNKNOWN" and nfp["gating"] is False  # evidence only, does not block PASS

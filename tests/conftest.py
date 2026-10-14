@@ -48,6 +48,20 @@ reference_tz = "America/New_York"
     return p
 
 
+class _NoHostCommands:
+    """Tests must not depend on the host: real `w32tm` on a Windows runner made results differ by OS."""
+
+    @staticmethod
+    def run(*args, **kwargs):
+        raise RuntimeError("host commands are disabled in tests; pass clock_runner explicitly")
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_host(monkeypatch):
+    import aurvex_lens.data.extract as extract
+    monkeypatch.setattr(extract, "subprocess", _NoHostCommands)
+
+
 @pytest.fixture
 def make_cfg(tmp_path):
     def _make(**over):
