@@ -53,11 +53,15 @@ Files are created with exclusive mode, set read-only, and re-hashed by `report` 
   release minute ET; no calendar → UNKNOWN; first-Friday approximation shown as "approx — not evidence"
   and never used for ranking or result. Anchors alone cannot identify the base offset k inside a DST family;
   the official NFP hits and the live offset do. PASS needs an approved rule (O3) with 0 unexplained weeks
-  (confirmed-holiday weeks excluded) and a synced local clock. Week matrix: `c4_rule_match_weeks.csv`.
+  (confirmed-holiday weeks excluded), a synced local clock, and agreement with the live offset (D-C4G;
+  live offset MEASURED only if the tick time changed during the probe, else `STALE_TICKS` → UNKNOWN).
+  With an official NFP calendar loaded, an approved rule that does not have the highest NFP hits → UNKNOWN. Week matrix: `c4_rule_match_weeks.csv`.
 - **C5** — status per component: `VERIFIED` / `SINGLE_SOURCE` / `MISSING` / `CONFLICT`
   (two sources disagree). Spread from tick bid/ask by server hour (single feed → SINGLE_SOURCE).
   Bar spread vs per-bar tick min/mean/open/close/max (match = |diff| ≤ 0.5 point); bar spread stays
-  "indicative". Commission (D-COMM): deal aggregates (per side IN/OUT and round turn per lot) vs official
+  "indicative". Commission (D-COMM, D-COMM2): BUY/SELL deals only; commission, fee and total per lot
+  (per side IN/OUT and round turn; positions with INOUT/OUT_BY excluded from round turn); all zero →
+  SUSPECT_ZERO; positive broker median → CONFLICT. Deal aggregates vs official
   value with source URL + verification date; |median| vs |official| within `commission_match_tolerance` →
   VERIFIED, else CONFLICT; one source → SINGLE_SOURCE; no deals → MISSING/NO_DEALS; history not returned →
   MISSING/ACCESS_DENIED. Swap / contract: `symbol_info` vs official values in config. Slippage: MISSING.

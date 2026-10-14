@@ -33,8 +33,11 @@ Exit codes: `0` PASS (warnings allowed), `2` FAIL, `3` UNKNOWN, `4` config error
    Negative tests prove each pattern is detected.
 6. No network server in Phase 0.
 7. Account numbers masked (`****1234`) in reports and console output; balance/equity/name not recorded.
-   Deal history (D-COMM): only commission aggregates and first/last deal day are stored — never ticket,
-   price, profit, position id, per-deal rows or timestamp lists.
+   Deal history (D-COMM, D-COMM2) — fields read in memory, nothing else:
+   `symbol`, `type`, `entry`, `volume`, `commission`, `fee` (if present), `position_id` (grouping only),
+   `time` (only for the first/last deal day). Stored: commission/fee/total aggregates, counts, first/last
+   deal day, and a type → count table of deals without a symbol. Never stored: ticket, order, price,
+   profit, swap, position id, amounts of non-symbol deals, per-deal rows or timestamp lists.
 8. No MQL5 scripts/EAs, no terminal setting changes (Market Watch included).
 
 ## Data egress (§4)

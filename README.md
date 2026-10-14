@@ -69,13 +69,23 @@ aurvex-lens extract
 aurvex-lens report
 ```
 
-- `identity` writes `data\reports\identity\<run>\identity_report.json`. Non-zero exit = stop:
-  `2` FAIL, `3` UNKNOWN (a field behaved unexpectedly — ask, do not assume), `4` config error,
-  `5` `initialize()` failed, `6` symbol not found / not visible in Market Watch (add it manually in the terminal).
+- `identity` writes `data\reports\identity\<run>\identity_report.json`. Any non-zero exit = stop and check.
 - `extract` repeats the identity check on the same connection and reads market data only if it passes.
   Output: `data\raw\<extraction_id>\` (never overwritten) with `meta.json` + sha256 per file.
 - `report` is offline (no MT5). Output: `data\reports\<extraction_id>\<report_run>\report.md` / `report.json`.
   Use `aurvex-lens report --extraction-id <id>` for a specific snapshot.
+
+### Exit codes (`identity`, `extract`, `report`)
+
+| Code | Meaning | What to do |
+|---|---|---|
+| 0 | OK | — |
+| 1 | `report` error (no COMPLETE snapshot, integrity check failed) | read the message |
+| 2 | identity FAIL (wrong path, forbidden path, other login/server, trading allowed) | stop; check the terminal / config |
+| 3 | identity UNKNOWN (a field behaved unexpectedly) | stop and ask — do not assume |
+| 4 | config error | fix `config\local.toml` |
+| 5 | `initialize()` failed or MetaTrader5 package missing | start the separate terminal, check `terminal_path` |
+| 6 | symbol not found / not visible in Market Watch | add the symbol to Market Watch manually in the terminal |
 
 ## After the first live report
 
